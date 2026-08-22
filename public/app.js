@@ -1092,13 +1092,25 @@ function onInput(e) {
   state[el.dataset.bind] = el.value;
   if (LIVE_BINDS.has(el.dataset.bind)) rerender();
 }
+const DEPOT_VIEW_FILTER_BINDS = new Set(['dashDepotFilter', 'stockDepotFilter', 'repDepotFilter']);
 function onChange(e) {
   const el = e.target;
   if (!el.dataset || !el.dataset.bind || el.tagName !== 'SELECT') return;
-  state[el.dataset.bind] = el.value;
-  if (el.dataset.bind === 'currentDepotId') {
+  const bind = el.dataset.bind;
+  state[bind] = el.value;
+  if (bind === 'currentDepotId') {
     // Switching the operating depot re-scopes every other depot-aware filter
     // to match, so the whole app consistently reflects "where I am now".
+    state.stockDepotFilter = el.value;
+    state.dashDepotFilter = el.value;
+    state.repDepotFilter = el.value;
+  } else if (DEPOT_VIEW_FILTER_BINDS.has(bind) && el.value !== 'all') {
+    // Picking a specific depot from any of these view filters (Dashboard,
+    // Stocks, Rapports) also becomes the operating depot, so it stays the
+    // one Caisse sells from until explicitly changed again — not just a
+    // read-only filter that quietly diverges from where sales actually go.
+    // "Tous les dépôts" stays a pure view and never touches it.
+    state.currentDepotId = el.value;
     state.stockDepotFilter = el.value;
     state.dashDepotFilter = el.value;
     state.repDepotFilter = el.value;
