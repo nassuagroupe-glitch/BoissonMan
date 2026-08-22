@@ -1,0 +1,13 @@
+{
+  "name": "boissonman",
+  "version": "1.0.0",
+  "description": "Application de gestion pour supermarché de boissons",
+  "private": true,
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

@@ -1,0 +1,560 @@
+// BoissonMan — serveur local (aucune dépendance npm).
+// Sert l'app statique (public/) et une API JSON persistée dans data/db.json.
+const http = require('http');
+const fs = require('fs');
+const path = require('path');
+const crypto = require('crypto');
+
+const DEFAULT_PASSWORD = '1234'; // seeded/legacy accounts only — set at creation for new employees
+
+const PORT = 8791;
+const HOST = '127.0.0.1';
+const PUBLIC_DIR = path.join(__dirname, 'public');
+const DB_PATH = path.join(__dirname, 'data', 'db.json');
+
+const MIME = {
+  '.html': 'text/html; charset=utf-8',
+  '.js': 'text/javascript; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
+  '.svg': 'image/svg+xml',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.ico': 'image/x-icon',
+};
+
+// ---------- Seed data (identique à l'esprit du prototype de design) ----------
+function daysAgo(n, hour, min) {
+  const d = new Date();
+  d.setHours(hour, min, 0, 0);
+  d.setDate(d.getDate() - n);
+  return d.toISOString();
+}
+// Splits a total quantity across depot ids using the given ratios (same
+// length/order as depotIds), keeping the exact sum by putting the rounding
+// remainder on the last depot.
+function splitStock(total, depotIds, ratios) {
+  const out = {};
+  let used = 0;
+  depotIds.forEach((id, i) => {
+    if (i === depotIds.length - 1) { out[id] = total - used; return; }
+    const qty = Math.round(total * ratios[i]);
+    out[id] = qty;
+    used += qty;
+  });
+  return out;
+}
+
+function buildSeed() {
+  const depots = [
+    { id: 'd1', name: 'Dépôt Central', address: 'Ouagadougou, Secteur 15' },
+    { id: 'd2', name: 'Dépôt Nord', address: 'Ouagadougou, Secteur 30' },
+  ];
+  const depotIds = depots.map((d) => d.id);
+  const categories = [
+    { id: 'c1', name: 'Sodas', color: '#c1440e' },
+    { id: 'c2', name: 'Bières', color: '#b8862f' },
+    { id: 'c3', name: 'Eaux', color: '#2f7f9e' },
+    { id: 'c4', name: 'Jus', color: '#d9812f' },
+    { id: 'c5', name: 'Vins', color: '#7d3b56' },
+    { id: 'c6', name: 'Spiritueux', color: '#5a4a34' },
+    { id: 'c7', name: 'Sucreries', color: '#c99a2e' },
+  ];
+  const suppliers = [
+    { id: 's1', name: 'Brasseries du Faso', phone: '+226 70 11 22 33', email: 'contact@bf-boissons.bf' },
+    { id: 's2', name: 'SOBEBRA Distribution', phone: '+226 70 22 33 44', email: 'ventes@sobebra.bf' },
+    { id: 's3', name: 'Aqua Distribution', phone: '+226 70 33 44 55', email: 'info@aquadist.bf' },
+    { id: 's4', name: 'Fruito SARL', phone: '+226 70 44 55 66', email: 'commande@fruito.bf' },
+    { id: 's5', name: 'Cave Excellence', phone: '+226 70 55 66 77', email: 'cave@excellence.bf' },
+    { id: 's6', name: 'Import Spiritueux CI', phone: '+226 70 66 77 88', email: 'import@spiritueux.ci' },
+    { id: 's7', name: 'Confiserie Plus', phone: '+226 70 77 88 99', email: 'contact@confiserieplus.bf' },
+  ];
+  const productsRaw = [
+    { id: 'p1', name: 'Coca-Cola 50cl', categoryId: 'c1', supplierId: 's1', price: 500, cost: 350, stock: 120, minStock: 30, sold: 210 },
+    { id: 'p2', name: 'Fanta Orange 50cl', categoryId: 'c1', supplierId: 's1', price: 500, cost: 350, stock: 85, minStock: 30, sold: 150 },
+    { id: 'p3', name: 'Sprite 50cl', categoryId: 'c1', supplierId: 's1', price: 500, cost: 350, stock: 60, minStock: 30, sold: 98 },
+    { id: 'p4', name: 'Pulpy Orange 50cl', categoryId: 'c1', supplierId: 's1', price: 600, cost: 420, stock: 15, minStock: 20, sold: 64 },
+    { id: 'p5', name: 'Castel Beer 65cl', categoryId: 'c2', supplierId: 's2', price: 700, cost: 480, stock: 200, minStock: 40, sold: 340 },
+    { id: 'p6', name: 'Guinness 33cl', categoryId: 'c2', supplierId: 's2', price: 900, cost: 620, stock: 55, minStock: 25, sold: 180 },
+    { id: 'p7', name: 'Heineken 33cl', categoryId: 'c2', supplierId: 's2', price: 1000, cost: 700, stock: 8, minStock: 20, sold: 96 },
+    { id: 'p8', name: 'Beaufort 65cl', categoryId: 'c2', supplierId: 's2', price: 650, cost: 450, stock: 130, minStock: 30, sold: 220 },
+    { id: 'p9', name: 'Eau Vive 1.5L', categoryId: 'c3', supplierId: 's3', price: 350, cost: 220, stock: 300, minStock: 50, sold: 410 },
+    { id: 'p10', name: 'Eau Vive 50cl', categoryId: 'c3', supplierId: 's3', price: 200, cost: 120, stock: 250, minStock: 50, sold: 330 },
+    { id: 'p11', name: 'Awa 1.5L', categoryId: 'c3', supplierId: 's3', price: 350, cost: 220, stock: 40, minStock: 40, sold: 120 },
+    { id: 'p12', name: 'Youki Ananas 1L', categoryId: 'c4', supplierId: 's4', price: 1200, cost: 850, stock: 45, minStock: 20, sold: 88 },
+    { id: 'p13', name: 'Youki Cocktail 1L', categoryId: 'c4', supplierId: 's4', price: 1200, cost: 850, stock: 38, minStock: 20, sold: 76 },
+    { id: 'p14', name: 'Tampico 1L', categoryId: 'c4', supplierId: 's4', price: 1100, cost: 780, stock: 5, minStock: 15, sold: 52 },
+    { id: 'p15', name: 'Vin Rouge Rochebelle', categoryId: 'c5', supplierId: 's5', price: 4500, cost: 3200, stock: 22, minStock: 10, sold: 34 },
+    { id: 'p16', name: 'Vin Blanc Doux', categoryId: 'c5', supplierId: 's5', price: 4200, cost: 3000, stock: 18, minStock: 10, sold: 29 },
+    { id: 'p17', name: 'Vin Rosé', categoryId: 'c5', supplierId: 's5', price: 4300, cost: 3050, stock: 12, minStock: 10, sold: 21 },
+    { id: 'p18', name: 'Whisky Label 5', categoryId: 'c6', supplierId: 's6', price: 15000, cost: 11000, stock: 9, minStock: 8, sold: 18 },
+    { id: 'p19', name: 'Pastis 51', categoryId: 'c6', supplierId: 's6', price: 8500, cost: 6200, stock: 14, minStock: 8, sold: 22 },
+    { id: 'p20', name: 'Rhum Négrita', categoryId: 'c6', supplierId: 's6', price: 9000, cost: 6500, stock: 0, minStock: 8, sold: 15 },
+    { id: 'p21', name: 'Chewing-gum Malabar', categoryId: 'c7', supplierId: 's7', price: 100, cost: 50, stock: 400, minStock: 50, sold: 520 },
+    { id: 'p22', name: 'Chocolat Cadbury', categoryId: 'c7', supplierId: 's7', price: 500, cost: 320, stock: 90, minStock: 30, sold: 140 },
+    { id: 'p23', name: 'Biscuit Pocket', categoryId: 'c7', supplierId: 's7', price: 300, cost: 190, stock: 150, minStock: 40, sold: 210 },
+  ];
+  const products = productsRaw.map((p, i) => {
+    const { stock, ...rest } = p;
+    return Object.assign({}, rest, {
+      stockByDepot: splitStock(stock, depotIds, [0.6]),
+      barcode: '20000000000' + String(i + 1).padStart(2, '0'),
+    });
+  });
+  const clients = [
+    { id: 'cl1', name: 'Aminata Traoré', phone: '+226 76 10 20 30', points: 340, totalSpent: 125000 },
+    { id: 'cl2', name: 'Boureima Kaboré', phone: '+226 76 20 30 40', points: 120, totalSpent: 48000 },
+    { id: 'cl3', name: 'Fatou Ouédraogo', phone: '+226 76 30 40 50', points: 560, totalSpent: 198000 },
+    { id: 'cl4', name: 'Issa Sawadogo', phone: '+226 76 40 50 60', points: 75, totalSpent: 26000 },
+    { id: 'cl5', name: 'Mariam Zongo', phone: '+226 76 50 60 70', points: 410, totalSpent: 152000 },
+  ];
+  const employees = [
+    { id: 'e1', name: 'Ismaël Nassua', role: 'Gérant', phone: '+226 70 00 00 01', active: true, depotId: null },
+    { id: 'e2', name: 'Adama Kéré', role: 'Caissier', phone: '+226 70 00 00 02', active: true, depotId: 'd1' },
+    { id: 'e3', name: 'Salimata Diallo', role: 'Caissier', phone: '+226 70 00 00 03', active: true, depotId: 'd2' },
+    { id: 'e4', name: 'Yacouba Sanou', role: 'Caissier', phone: '+226 70 00 00 04', active: false, depotId: 'd1' },
+  ].map((e) => Object.assign(e, hashPassword(DEFAULT_PASSWORD)));
+  const empDepot = {}; employees.forEach((e) => { empDepot[e.name] = e.depotId; });
+  const depotName = {}; depots.forEach((d) => { depotName[d.id] = d.name; });
+  const salesSeed = [
+    { dayOffset: 6, hour: 9, min: 15, cashier: 'Adama Kéré', itemCount: 4, total: 5400, paymentMethod: 'Espèces' },
+    { dayOffset: 6, hour: 14, min: 40, cashier: 'Salimata Diallo', itemCount: 2, total: 1900, paymentMethod: 'Mobile Money' },
+    { dayOffset: 5, hour: 10, min: 5, cashier: 'Adama Kéré', itemCount: 6, total: 8300, paymentMethod: 'Espèces' },
+    { dayOffset: 5, hour: 16, min: 20, cashier: 'Salimata Diallo', itemCount: 1, total: 4500, paymentMethod: 'Carte' },
+    { dayOffset: 4, hour: 9, min: 50, cashier: 'Adama Kéré', itemCount: 3, total: 2600, paymentMethod: 'Espèces' },
+    { dayOffset: 4, hour: 17, min: 10, cashier: 'Yacouba Sanou', itemCount: 5, total: 6100, paymentMethod: 'Mobile Money' },
+    { dayOffset: 3, hour: 11, min: 30, cashier: 'Salimata Diallo', itemCount: 2, total: 15900, paymentMethod: 'Carte' },
+    { dayOffset: 3, hour: 15, min: 45, cashier: 'Adama Kéré', itemCount: 8, total: 9800, paymentMethod: 'Espèces' },
+    { dayOffset: 2, hour: 10, min: 20, cashier: 'Adama Kéré', itemCount: 3, total: 3300, paymentMethod: 'Espèces' },
+    { dayOffset: 2, hour: 18, min: 5, cashier: 'Salimata Diallo', itemCount: 4, total: 5200, paymentMethod: 'Mobile Money' },
+    { dayOffset: 1, hour: 9, min: 40, cashier: 'Adama Kéré', itemCount: 6, total: 7600, paymentMethod: 'Espèces' },
+    { dayOffset: 1, hour: 13, min: 15, cashier: 'Salimata Diallo', itemCount: 2, total: 2000, paymentMethod: 'Carte' },
+    { dayOffset: 0, hour: 9, min: 5, cashier: 'Adama Kéré', itemCount: 5, total: 6900, paymentMethod: 'Espèces' },
+    { dayOffset: 0, hour: 12, min: 30, cashier: 'Salimata Diallo', itemCount: 3, total: 8500, paymentMethod: 'Mobile Money' },
+  ];
+  const sales = salesSeed.map((s, i) => {
+    const depotId = empDepot[s.cashier] || 'd1';
+    return {
+      id: 'sale-seed-' + (i + 1),
+      date: daysAgo(s.dayOffset, s.hour, s.min),
+      cashier: s.cashier,
+      depotId,
+      depotName: depotName[depotId] || '',
+      clientId: '',
+      clientName: '',
+      itemCount: s.itemCount,
+      total: s.total,
+      paymentMethod: s.paymentMethod,
+      items: [],
+    };
+  });
+  return { depots, categories, suppliers, products, clients, employees, sales };
+}
+
+// Upgrades a pre-multi-dépôt db.json (flat product.stock, no depots) in
+// place. Existing stock is preserved by putting all of it into a single new
+// "Dépôt principal" depot — splitting it across invented depots would
+// misrepresent real inventory the user already entered.
+function migrateToDepots(data) {
+  let changed = false;
+  if (!Array.isArray(data.depots) || data.depots.length === 0) {
+    data.depots = [{ id: 'd1', name: 'Dépôt principal', address: '' }];
+    changed = true;
+  }
+  const defaultDepotId = data.depots[0].id;
+  const depotName = {}; data.depots.forEach((d) => { depotName[d.id] = d.name; });
+
+  (data.products || []).forEach((p) => {
+    if (!p.stockByDepot) {
+      p.stockByDepot = { [defaultDepotId]: typeof p.stock === 'number' ? p.stock : 0 };
+      delete p.stock;
+      changed = true;
+    }
+  });
+  (data.employees || []).forEach((e) => {
+    if (!('depotId' in e)) {
+      e.depotId = e.role === 'Gérant' ? null : defaultDepotId;
+      changed = true;
+    }
+    if (!e.passwordHash) {
+      Object.assign(e, hashPassword(DEFAULT_PASSWORD));
+      changed = true;
+    }
+  });
+  (data.sales || []).forEach((s) => {
+    if (!s.depotId) {
+      s.depotId = defaultDepotId;
+      s.depotName = depotName[defaultDepotId] || '';
+      changed = true;
+    }
+  });
+  return changed;
+}
+
+// ---------- Persistence ----------
+function loadDB() {
+  if (!fs.existsSync(DB_PATH)) {
+    const seed = buildSeed();
+    fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
+    fs.writeFileSync(DB_PATH, JSON.stringify(seed, null, 2));
+    return seed;
+  }
+  const data = JSON.parse(fs.readFileSync(DB_PATH, 'utf8'));
+  if (migrateToDepots(data)) fs.writeFileSync(DB_PATH, JSON.stringify(data, null, 2));
+  return data;
+}
+function saveDB(db) {
+  fs.writeFileSync(DB_PATH, JSON.stringify(db, null, 2));
+}
+
+let db = loadDB();
+
+// ---------- Helpers ----------
+function uid(prefix) {
+  return prefix + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+}
+function sendJSON(res, status, data) {
+  const body = JSON.stringify(data);
+  res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' });
+  res.end(body);
+}
+function readJSONBody(req) {
+  return new Promise((resolve, reject) => {
+    let chunks = '';
+    req.on('data', (c) => {
+      chunks += c;
+      if (chunks.length > 1e6) req.destroy();
+    });
+    req.on('end', () => {
+      if (!chunks) return resolve({});
+      try { resolve(JSON.parse(chunks)); } catch (e) { reject(e); }
+    });
+    req.on('error', reject);
+  });
+}
+function stockAt(product, depotId) {
+  return (product.stockByDepot && product.stockByDepot[depotId]) || 0;
+}
+// True if removing/demoting/deactivating employeeId would leave zero active Gérant accounts.
+function lastActiveManager(employeeId) {
+  return db.employees.filter((e) => e.role === 'Gérant' && e.active && e.id !== employeeId).length === 0;
+}
+function hashPassword(password, salt) {
+  salt = salt || crypto.randomBytes(16).toString('hex');
+  const hash = crypto.scryptSync(password, salt, 64).toString('hex');
+  return { passwordSalt: salt, passwordHash: hash };
+}
+function verifyPassword(password, salt, hash) {
+  if (!salt || !hash) return false;
+  const check = crypto.scryptSync(password, salt, 64).toString('hex');
+  const a = Buffer.from(check, 'hex'), b = Buffer.from(hash, 'hex');
+  if (a.length !== b.length) return false;
+  return crypto.timingSafeEqual(a, b);
+}
+// Strips credential fields before an employee record ever leaves the server.
+function publicEmployee(e) {
+  const { passwordHash, passwordSalt, ...rest } = e;
+  return rest;
+}
+function publicState() {
+  return Object.assign({}, db, { employees: db.employees.map(publicEmployee) });
+}
+
+const CAT_PALETTE = ['#c1440e', '#b8862f', '#2f7f9e', '#d9812f', '#7d3b56', '#5a4a34', '#c99a2e', '#3b6e5c', '#4a6fa5', '#8a5a83'];
+
+// ---------- API ----------
+async function handleApi(req, res, pathname) {
+  const method = req.method;
+
+  if (pathname === '/api/state' && method === 'GET') {
+    return sendJSON(res, 200, publicState());
+  }
+
+  if (pathname === '/api/login' && method === 'POST') {
+    const body = await readJSONBody(req);
+    const username = (body.username || '').trim();
+    const password = body.password || '';
+    if (!username || !password) return sendJSON(res, 400, { error: 'Identifiant et mot de passe requis' });
+    const employee = db.employees.find((e) =>
+      e.phone === username || e.name.toLowerCase() === username.toLowerCase());
+    if (!employee || !verifyPassword(password, employee.passwordSalt, employee.passwordHash)) {
+      return sendJSON(res, 401, { error: 'Identifiant ou mot de passe incorrect' });
+    }
+    if (!employee.active) return sendJSON(res, 403, { error: 'Ce compte est désactivé' });
+    const role = employee.role === 'Gérant' ? 'manager' : 'cashier';
+    if (body.expectedRole && body.expectedRole !== role) {
+      return sendJSON(res, 403, { error: `Ce compte est un compte ${employee.role}. Utilisez le bouton correspondant.` });
+    }
+    return sendJSON(res, 200, { role, userId: employee.id, userName: employee.name, depotId: employee.depotId });
+  }
+
+  if (pathname === '/api/change-password' && method === 'POST') {
+    const body = await readJSONBody(req);
+    const employee = db.employees.find((e) => e.id === body.userId);
+    if (!employee) return sendJSON(res, 404, { error: 'Compte introuvable' });
+    if (!verifyPassword(body.currentPassword || '', employee.passwordSalt, employee.passwordHash)) {
+      return sendJSON(res, 401, { error: 'Mot de passe actuel incorrect' });
+    }
+    const newPassword = body.newPassword || '';
+    if (newPassword.length < 4) return sendJSON(res, 400, { error: 'Le nouveau mot de passe doit contenir au moins 4 caractères' });
+    Object.assign(employee, hashPassword(newPassword));
+    saveDB(db);
+    return sendJSON(res, 200, { ok: true });
+  }
+
+  if (pathname === '/api/depots' && method === 'POST') {
+    const body = await readJSONBody(req);
+    const name = (body.name || '').trim();
+    if (!name) return sendJSON(res, 400, { error: 'Nom requis' });
+    const depot = { id: uid('d'), name, address: body.address || '' };
+    db.depots.push(depot);
+    saveDB(db);
+    return sendJSON(res, 201, depot);
+  }
+
+  if (pathname === '/api/categories' && method === 'POST') {
+    const body = await readJSONBody(req);
+    const name = (body.name || '').trim();
+    if (!name) return sendJSON(res, 400, { error: 'Nom requis' });
+    const color = CAT_PALETTE[db.categories.length % CAT_PALETTE.length];
+    const category = { id: uid('c'), name, color };
+    db.categories.push(category);
+    saveDB(db);
+    return sendJSON(res, 201, category);
+  }
+
+  if (pathname === '/api/suppliers' && method === 'POST') {
+    const body = await readJSONBody(req);
+    const name = (body.name || '').trim();
+    if (!name) return sendJSON(res, 400, { error: 'Nom requis' });
+    const supplier = { id: uid('s'), name, phone: body.phone || '', email: body.email || '' };
+    db.suppliers.push(supplier);
+    saveDB(db);
+    return sendJSON(res, 201, supplier);
+  }
+
+  if (pathname === '/api/clients' && method === 'POST') {
+    const body = await readJSONBody(req);
+    const name = (body.name || '').trim();
+    if (!name) return sendJSON(res, 400, { error: 'Nom requis' });
+    const client = { id: uid('cl'), name, phone: body.phone || '', points: 0, totalSpent: 0 };
+    db.clients.push(client);
+    saveDB(db);
+    return sendJSON(res, 201, client);
+  }
+
+  if (pathname === '/api/employees' && method === 'POST') {
+    const body = await readJSONBody(req);
+    const name = (body.name || '').trim();
+    if (!name) return sendJSON(res, 400, { error: 'Nom requis' });
+    const password = body.password || '';
+    if (password.length < 4) return sendJSON(res, 400, { error: 'Mot de passe trop court (4 caractères minimum)' });
+    const role = body.role === 'Gérant' ? 'Gérant' : 'Caissier';
+    const employee = Object.assign({
+      id: uid('e'), name, role, phone: body.phone || '', active: true,
+      depotId: body.depotId || null,
+    }, hashPassword(password));
+    db.employees.push(employee);
+    saveDB(db);
+    return sendJSON(res, 201, publicEmployee(employee));
+  }
+
+  const empToggleMatch = pathname.match(/^\/api\/employees\/([^/]+)\/toggle$/);
+  if (empToggleMatch && method === 'PATCH') {
+    const employee = db.employees.find((e) => e.id === empToggleMatch[1]);
+    if (!employee) return sendJSON(res, 404, { error: 'Employé introuvable' });
+    if (employee.active && employee.role === 'Gérant' && lastActiveManager(employee.id)) {
+      return sendJSON(res, 409, { error: 'Impossible de désactiver le dernier compte Gérant actif' });
+    }
+    employee.active = !employee.active;
+    saveDB(db);
+    return sendJSON(res, 200, publicEmployee(employee));
+  }
+
+  const empUpdateMatch = pathname.match(/^\/api\/employees\/([^/]+)$/);
+  if (empUpdateMatch && method === 'PATCH') {
+    const employee = db.employees.find((e) => e.id === empUpdateMatch[1]);
+    if (!employee) return sendJSON(res, 404, { error: 'Employé introuvable' });
+    const body = await readJSONBody(req);
+    if (body.name !== undefined) {
+      const name = body.name.trim();
+      if (!name) return sendJSON(res, 400, { error: 'Nom requis' });
+      employee.name = name;
+    }
+    if (body.role !== undefined) {
+      const newRole = body.role === 'Gérant' ? 'Gérant' : 'Caissier';
+      if (employee.role === 'Gérant' && newRole !== 'Gérant' && employee.active && lastActiveManager(employee.id)) {
+        return sendJSON(res, 409, { error: 'Impossible de rétrograder le dernier compte Gérant actif' });
+      }
+      employee.role = newRole;
+    }
+    if (body.phone !== undefined) employee.phone = body.phone;
+    if (body.depotId !== undefined) employee.depotId = body.depotId || null;
+    saveDB(db);
+    return sendJSON(res, 200, publicEmployee(employee));
+  }
+
+  if (empUpdateMatch && method === 'DELETE') {
+    const employee = db.employees.find((e) => e.id === empUpdateMatch[1]);
+    if (!employee) return sendJSON(res, 404, { error: 'Employé introuvable' });
+    if (employee.active && employee.role === 'Gérant' && lastActiveManager(employee.id)) {
+      return sendJSON(res, 409, { error: 'Impossible de supprimer le dernier compte Gérant actif' });
+    }
+    db.employees = db.employees.filter((e) => e.id !== employee.id);
+    saveDB(db);
+    return sendJSON(res, 200, { ok: true });
+  }
+
+  if (pathname === '/api/products' && method === 'POST') {
+    const body = await readJSONBody(req);
+    const name = (body.name || '').trim();
+    if (!name) return sendJSON(res, 400, { error: 'Nom requis' });
+    const initialDepotId = body.depotId || (db.depots[0] && db.depots[0].id) || '';
+    const stockByDepot = {};
+    db.depots.forEach((d) => { stockByDepot[d.id] = d.id === initialDepotId ? (Number(body.stock) || 0) : 0; });
+    const product = {
+      id: uid('p'), name,
+      categoryId: body.categoryId || (db.categories[0] && db.categories[0].id) || '',
+      supplierId: body.supplierId || (db.suppliers[0] && db.suppliers[0].id) || '',
+      price: Number(body.price) || 0,
+      cost: Number(body.cost) || 0,
+      stockByDepot,
+      minStock: Number(body.minStock) || 10,
+      sold: 0,
+      barcode: uid('bc').slice(0, 13),
+    };
+    db.products.push(product);
+    saveDB(db);
+    return sendJSON(res, 201, product);
+  }
+
+  const stockMatch = pathname.match(/^\/api\/products\/([^/]+)\/stock$/);
+  if (stockMatch && method === 'PATCH') {
+    const body = await readJSONBody(req);
+    const product = db.products.find((p) => p.id === stockMatch[1]);
+    if (!product) return sendJSON(res, 404, { error: 'Produit introuvable' });
+    const depotId = body.depotId;
+    if (!depotId || !db.depots.some((d) => d.id === depotId)) return sendJSON(res, 400, { error: 'Dépôt invalide' });
+    const delta = Number(body.delta) || 0;
+    product.stockByDepot[depotId] = Math.max(0, stockAt(product, depotId) + delta);
+    saveDB(db);
+    return sendJSON(res, 200, product);
+  }
+
+  if (pathname === '/api/stock-transfer' && method === 'POST') {
+    const body = await readJSONBody(req);
+    const product = db.products.find((p) => p.id === body.productId);
+    if (!product) return sendJSON(res, 400, { error: 'Produit introuvable' });
+    const { fromDepotId, toDepotId } = body;
+    const qty = Number(body.qty) || 0;
+    if (!fromDepotId || !toDepotId || fromDepotId === toDepotId) return sendJSON(res, 400, { error: 'Dépôts invalides' });
+    if (qty <= 0) return sendJSON(res, 400, { error: 'Quantité invalide' });
+    if (stockAt(product, fromDepotId) < qty) return sendJSON(res, 409, { error: 'Stock insuffisant au dépôt source' });
+    product.stockByDepot[fromDepotId] -= qty;
+    product.stockByDepot[toDepotId] = stockAt(product, toDepotId) + qty;
+    saveDB(db);
+    return sendJSON(res, 200, product);
+  }
+
+  if (pathname === '/api/checkout' && method === 'POST') {
+    const body = await readJSONBody(req);
+    const cart = Array.isArray(body.cart) ? body.cart : [];
+    if (cart.length === 0) return sendJSON(res, 400, { error: 'Panier vide' });
+    const depot = db.depots.find((d) => d.id === body.depotId);
+    if (!depot) return sendJSON(res, 400, { error: 'Dépôt invalide' });
+
+    // Validate stock availability before committing anything.
+    for (const ci of cart) {
+      const product = db.products.find((p) => p.id === ci.productId);
+      if (!product) return sendJSON(res, 400, { error: 'Produit introuvable : ' + ci.productId });
+      if (ci.qty <= 0 || ci.qty > stockAt(product, depot.id)) {
+        return sendJSON(res, 409, { error: 'Stock insuffisant pour ' + product.name + ' au ' + depot.name });
+      }
+    }
+
+    let total = 0;
+    const items = cart.map((ci) => {
+      const product = db.products.find((p) => p.id === ci.productId);
+      product.stockByDepot[depot.id] = stockAt(product, depot.id) - ci.qty;
+      product.sold += ci.qty;
+      const lineTotal = product.price * ci.qty;
+      total += lineTotal;
+      return { productId: product.id, name: product.name, qty: ci.qty, unitPrice: product.price, lineTotal };
+    });
+
+    let clientName = '';
+    if (body.clientId) {
+      const client = db.clients.find((c) => c.id === body.clientId);
+      if (client) {
+        clientName = client.name;
+        client.points += Math.floor(total / 100);
+        client.totalSpent += total;
+      }
+    }
+
+    const sale = {
+      id: uid('sale'),
+      date: new Date().toISOString(),
+      cashier: body.cashier || 'Caissier',
+      depotId: depot.id,
+      depotName: depot.name,
+      clientId: body.clientId || '',
+      clientName,
+      itemCount: cart.reduce((a, c) => a + c.qty, 0),
+      total,
+      paymentMethod: body.paymentMethod || 'Espèces',
+      items,
+    };
+    db.sales.unshift(sale);
+    saveDB(db);
+    return sendJSON(res, 201, { sale });
+  }
+
+  return sendJSON(res, 404, { error: 'Route inconnue' });
+}
+
+// ---------- Static file serving ----------
+function serveStatic(req, res, pathname) {
+  let reqPath = pathname === '/' ? '/index.html' : pathname;
+  const filePath = path.normalize(path.join(PUBLIC_DIR, reqPath));
+  if (!filePath.startsWith(PUBLIC_DIR)) {
+    res.writeHead(403);
+    res.end('Forbidden');
+    return;
+  }
+  fs.readFile(filePath, (err, data) => {
+    if (err) {
+      res.writeHead(404, { 'Content-Type': 'text/plain' });
+      res.end('Not found: ' + reqPath);
+      return;
+    }
+    const ext = path.extname(filePath).toLowerCase();
+    res.writeHead(200, { 'Content-Type': MIME[ext] || 'application/octet-stream' });
+    res.end(data);
+  });
+}
+
+const server = http.createServer((req, res) => {
+  const pathname = decodeURIComponent(req.url.split('?')[0]);
+  if (pathname.startsWith('/api/')) {
+    handleApi(req, res, pathname).catch((err) => {
+      console.error(err);
+      sendJSON(res, 400, { error: 'Requête invalide' });
+    });
+    return;
+  }
+  serveStatic(req, res, pathname);
+});
+
+server.on('error', (err) => {
+  if (err.code === 'EADDRINUSE') {
+    // Déjà lancé depuis un précédent démarrage — rien à faire.
+    process.exit(0);
+  }
+  console.error(err);
+  process.exit(1);
+});
+
+server.listen(PORT, HOST, () => {
+  console.log(`BoissonMan disponible sur http://${HOST}:${PORT}`);
+});
