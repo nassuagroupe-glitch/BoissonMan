@@ -18,6 +18,7 @@ const ICON_CHECK = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" 
 const ICON_CLOSE = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M18 6 6 18M6 6l12 12"></path></svg>';
 const ICON_RESTOCK = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3"><path d="M12 4v11"></path><path d="M8 11l4 4 4-4"></path><path d="M4 18h16"></path></svg>';
 const ICON_CAMERA = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"></rect><rect x="14" y="3" width="7" height="7" rx="1"></rect><rect x="3" y="14" width="7" height="7" rx="1"></rect><path d="M14 14h3v3h-3zM20 14v7M14 20h4"></path></svg>';
+const ICON_CREDIT = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="5" width="20" height="14" rx="2"></rect><path d="M2 10h20"></path><path d="M6 15h4"></path></svg>';
 
 const CAT_ICONS = {
   sodas: '<svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M10 2h4v3.5c1.3.6 2 1.7 2 3v11.5a2 2 0 0 1-2 2h-4a2 2 0 0 1-2-2V8.5c0-1.3.7-2.4 2-3V2z"></path><path d="M8 12h8"></path><circle cx="14.5" cy="9.5" r="0.4" fill="currentColor" stroke="none"></circle></svg>',
@@ -38,6 +39,7 @@ const NAV_ITEMS = [
   { key: 'categories', label: 'Catégories', icon: ICON_CAT, managerOnly: false },
   { key: 'fournisseurs', label: 'Fournisseurs', icon: ICON_FOURN, managerOnly: true },
   { key: 'clients', label: 'Clients', icon: ICON_CLIENTS, managerOnly: false },
+  { key: 'credits', label: 'Crédits', icon: ICON_CREDIT, managerOnly: false },
   { key: 'rapports', label: 'Rapports', icon: ICON_RAPPORTS, managerOnly: true },
   { key: 'employes', label: 'Employés', icon: ICON_EMP, managerOnly: true },
   { key: 'account', label: 'Mon compte', icon: ICON_ACCOUNT, managerOnly: false },
@@ -51,6 +53,7 @@ const TITLES = {
   categories: ['Catégories', 'Organisation des familles de produits'],
   fournisseurs: ['Fournisseurs', 'Partenaires et approvisionnement'],
   clients: ['Clients', 'Base clients et fidélité'],
+  credits: ['Crédits', 'Ventes à crédit et versements'],
   rapports: ['Rapports', 'Performance commerciale'],
   employes: ['Employés', 'Équipe et accès'],
   account: ['Mon compte', 'Sécurité de votre compte'],
@@ -76,6 +79,7 @@ const state = {
   showAddDepot: false, ndName: '', ndAddress: '',
   showTransfer: false, trProductId: '', trFromDepotId: '', trToDepotId: '', trQty: '',
   showRestock: false, rsProductId: '', rsDepotId: '', rsQty: '',
+  creditFilter: 'open', showCreditPayment: false, cpSaleId: '', cpAmount: '',
   pwCurrent: '', pwNew: '', pwConfirm: '', pwError: null, pwSuccess: null,
   toast: null,
   showReceipt: false, lastReceipt: null,
@@ -226,6 +230,10 @@ function removeFromCart(productId) {
 }
 async function checkout() {
   if (state.cart.length === 0) return;
+  if (state.paymentMethod === 'Crédit' && !state.posClientId) {
+    flashToast('Sélectionnez un client pour une vente à crédit');
+    return;
+  }
   try {
     const data = await api('POST', '/api/checkout', {
       cart: state.cart, clientId: state.posClientId, paymentMethod: state.paymentMethod, cashier: state.userName, depotId: state.currentDepotId,
@@ -348,6 +356,23 @@ async function restockProduct() {
     if (idx >= 0) state.products[idx] = updated;
     state.showRestock = false; state.rsProductId = ''; state.rsQty = '';
     flashToast('Réapprovisionné : +' + qty + ' ' + product.name);
+    rerender();
+  } catch (e) { flashToast(e.message); }
+}
+
+// ---------- Crédits ----------
+async function submitCreditPayment() {
+  if (!state.cpSaleId) return;
+  const amount = Number(state.cpAmount) || 0;
+  if (amount <= 0) return;
+  try {
+    const updated = await api('POST', `/api/credit-sales/${state.cpSaleId}/payment`, { amount });
+    const idx = state.sales.findIndex((s) => s.id === updated.id);
+    if (idx >= 0) state.sales[idx] = updated;
+    state.showCreditPayment = false; state.cpSaleId = ''; state.cpAmount = '';
+    flashToast(updated.creditRemaining > 0
+      ? 'Versement enregistré. Reste à payer : ' + fcfa(updated.creditRemaining)
+      : 'Crédit soldé !');
     rerender();
   } catch (e) { flashToast(e.message); }
 }
@@ -569,6 +594,7 @@ function renderScreen() {
     case 'categories': return renderCategories();
     case 'fournisseurs': return renderFournisseurs();
     case 'clients': return renderClients();
+    case 'credits': return renderCredits();
     case 'rapports': return renderRapports();
     case 'employes': return renderEmployes();
     case 'account': return renderAccount();
@@ -692,9 +718,11 @@ function renderCaisse() {
           <div class="pay-tab${state.paymentMethod === 'Espèces' ? ' active' : ''}" data-action="setPayCash">Espèces</div>
           <div class="pay-tab${state.paymentMethod === 'Mobile Money' ? ' active' : ''}" data-action="setPayMobile">Mobile Money</div>
           <div class="pay-tab${state.paymentMethod === 'Carte' ? ' active' : ''}" data-action="setPayCard">Carte</div>
+          <div class="pay-tab${state.paymentMethod === 'Crédit' ? ' active' : ''}" data-action="setPayCredit">Crédit</div>
         </div>
+        ${state.paymentMethod === 'Crédit' && !state.posClientId ? `<div class="pos-error">Sélectionnez un client pour une vente à crédit.</div>` : ''}
         <div class="cart-total-row"><span>Total</span><span class="cart-total-value">${fcfa(cartTotal)}</span></div>
-        <div class="checkout-btn" style="${state.cart.length ? '' : 'opacity:0.5;cursor:not-allowed'}" data-action="checkout">Encaisser</div>
+        <div class="checkout-btn" style="${state.cart.length && !(state.paymentMethod === 'Crédit' && !state.posClientId) ? '' : 'opacity:0.5;cursor:not-allowed'}" data-action="checkout">Encaisser</div>
       </div>
     </div>
   </div>`;
@@ -876,7 +904,16 @@ function renderFournisseurs() {
 }
 
 function renderClients() {
-  const rows = state.clients.map((c) => `<tr><td style="font-weight:600">${esc(c.name)}</td><td>${esc(c.phone)}</td><td class="center">${c.points}</td><td class="right">${fcfa(c.totalSpent)}</td></tr>`).join('');
+  const creditByClient = {};
+  state.sales.forEach((sa) => {
+    if (sa.paymentMethod === 'Crédit' && sa.creditRemaining > 0 && sa.clientId) {
+      creditByClient[sa.clientId] = (creditByClient[sa.clientId] || 0) + sa.creditRemaining;
+    }
+  });
+  const rows = state.clients.map((c) => {
+    const owed = creditByClient[c.id] || 0;
+    return `<tr><td style="font-weight:600">${esc(c.name)}</td><td>${esc(c.phone)}</td><td class="center">${c.points}</td><td class="right">${fcfa(c.totalSpent)}</td><td class="right"${owed ? ' style="color:var(--danger);font-weight:700"' : ''}>${owed ? fcfa(owed) : '—'}</td></tr>`;
+  }).join('');
   const addFormHtml = state.showAddClient ? `<div class="add-form cols-inline" style="gap:10px">
     <input id="field-ncliName" class="field" style="flex:1" type="text" placeholder="Nom du client" value="${esc(state.ncliName)}" data-bind="ncliName" />
     <input id="field-ncliPhone" class="field" style="flex:1" type="text" placeholder="Téléphone" value="${esc(state.ncliPhone)}" data-bind="ncliPhone" />
@@ -886,9 +923,61 @@ function renderClients() {
     <div style="display:flex;justify-content:flex-end;margin-bottom:16px"><div class="add-btn" data-action="toggleAddClient">+ Ajouter un client</div></div>
     ${addFormHtml}
     <div class="table-card"><table class="data-table">
-      <tr><th>CLIENT</th><th>TÉLÉPHONE</th><th class="center">POINTS FIDÉLITÉ</th><th class="right">TOTAL DÉPENSÉ</th></tr>
+      <tr><th>CLIENT</th><th>TÉLÉPHONE</th><th class="center">POINTS FIDÉLITÉ</th><th class="right">TOTAL DÉPENSÉ</th><th class="right">CRÉDIT EN COURS</th></tr>
       ${rows}
     </table></div>
+  </div>`;
+}
+
+function renderCredits() {
+  const filter = state.creditFilter || 'open';
+  let creditSales = state.sales.filter((sa) => sa.paymentMethod === 'Crédit');
+  const totalOutstanding = creditSales.reduce((a, sa) => a + (sa.creditRemaining || 0), 0);
+  if (filter === 'open') creditSales = creditSales.filter((sa) => sa.creditRemaining > 0);
+  creditSales = creditSales.slice().sort((a, b) => new Date(b.date) - new Date(a.date));
+
+  const rows = creditSales.map((sa) => {
+    const settled = sa.creditRemaining <= 0;
+    const st = settled ? { label: 'Soldé', cls: 'ok' } : { label: 'En cours', cls: 'warning' };
+    const actionHtml = settled ? '' : `<div class="add-btn" style="background:#fff;color:var(--green);border:1px solid var(--border);padding:6px 12px;font-size:12px" data-action="openCreditPayment" data-id="${sa.id}">Encaisser un versement</div>`;
+    return `<tr>
+      <td style="font-weight:600">${esc(sa.clientName || '—')}</td>
+      <td>${esc(sa.depotName || '—')}</td>
+      <td>${esc(dayLabel(sa.date))}</td>
+      <td class="right">${fcfa(sa.total)}</td>
+      <td class="right">${fcfa(sa.creditPaid || 0)}</td>
+      <td class="right" style="font-weight:700;color:${settled ? 'var(--green)' : 'var(--danger)'}">${fcfa(sa.creditRemaining || 0)}</td>
+      <td class="center"><span class="badge ${st.cls}">${st.label}</span></td>
+      <td class="center">${actionHtml}</td>
+    </tr>`;
+  }).join('');
+
+  const paymentFormHtml = state.showCreditPayment ? renderCreditPaymentForm() : '';
+
+  return `<div>
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;flex-wrap:wrap;gap:10px">
+      <div class="card" style="padding:14px 18px"><div class="kpi-label">CRÉDIT TOTAL EN COURS</div><div class="kpi-value" style="color:var(--danger)">${fcfa(totalOutstanding)}</div></div>
+      <select id="field-creditFilter" class="field" data-bind="creditFilter">
+        <option value="open"${filter === 'open' ? ' selected' : ''}>Crédits en cours</option>
+        <option value="all"${filter === 'all' ? ' selected' : ''}>Tout l'historique</option>
+      </select>
+    </div>
+    ${paymentFormHtml}
+    <div class="table-card"><table class="data-table">
+      <tr><th>CLIENT</th><th>DÉPÔT</th><th>DATE</th><th class="right">TOTAL</th><th class="right">PAYÉ</th><th class="right">RESTANT</th><th class="center">STATUT</th><th class="center">ACTION</th></tr>
+      ${rows || '<tr><td colspan="8" style="text-align:center;color:var(--muted);padding:20px">Aucune vente à crédit.</td></tr>'}
+    </table></div>
+  </div>`;
+}
+
+function renderCreditPaymentForm() {
+  const sale = state.sales.find((s) => s.id === state.cpSaleId);
+  if (!sale) return '';
+  return `<div class="add-form cols-4">
+    <div style="grid-column:1/-1;font-size:13px">${esc(sale.clientName)} — reste à payer : <strong>${fcfa(sale.creditRemaining)}</strong></div>
+    <input id="field-cpAmount" class="field" type="number" placeholder="Montant du versement" value="${esc(state.cpAmount)}" data-bind="cpAmount" />
+    <div class="save-btn" data-action="doCreditPayment">Encaisser</div>
+    <div class="add-btn" style="background:#fff;color:var(--muted);border:1px solid var(--border)" data-action="cancelCreditPayment">Annuler</div>
   </div>`;
 }
 
@@ -1047,6 +1136,7 @@ function renderReceiptModal() {
           <div class="receipt-items">${itemsHtml}</div>
           <div class="receipt-total"><span>Total</span><span>${fcfa(r.total)}</span></div>
           <div class="receipt-pay"><span>Paiement</span><span>${esc(r.paymentMethod)}</span></div>
+          ${r.paymentMethod === 'Crédit' ? `<div class="receipt-pay"><span>Solde restant</span><span>${fcfa(r.creditRemaining)}</span></div>` : ''}
           <div class="receipt-thanks">Merci de votre achat !</div>
         </div>
       </div>
@@ -1079,6 +1169,7 @@ const Actions = {
   setPayCash: () => { state.paymentMethod = 'Espèces'; rerender(); },
   setPayMobile: () => { state.paymentMethod = 'Mobile Money'; rerender(); },
   setPayCard: () => { state.paymentMethod = 'Carte'; rerender(); },
+  setPayCredit: () => { state.paymentMethod = 'Crédit'; rerender(); },
   checkout: () => checkout(),
   openScanner: () => { state.showScanner = true; state.scanError = null; rerender(); },
   closeScanner: () => { state.showScanner = false; state.scanError = null; rerender(); },
@@ -1102,6 +1193,9 @@ const Actions = {
     rerender();
   },
   doRestock: () => restockProduct(),
+  openCreditPayment: (ds) => { state.showCreditPayment = true; state.cpSaleId = ds.id; state.cpAmount = ''; rerender(); },
+  cancelCreditPayment: () => { state.showCreditPayment = false; state.cpSaleId = ''; state.cpAmount = ''; rerender(); },
+  doCreditPayment: () => submitCreditPayment(),
   toggleAddDepot: () => { state.showAddDepot = !state.showAddDepot; rerender(); },
   addDepot: () => addDepot(),
   toggleAddCategory: () => { state.showAddCategory = !state.showAddCategory; rerender(); },

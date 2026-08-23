@@ -462,6 +462,10 @@ async function handleApi(req, res, pathname) {
     if (cart.length === 0) return sendJSON(res, 400, { error: 'Panier vide' });
     const depot = db.depots.find((d) => d.id === body.depotId);
     if (!depot) return sendJSON(res, 400, { error: 'Dépôt invalide' });
+    const paymentMethod = body.paymentMethod || 'Espèces';
+    if (paymentMethod === 'Crédit' && !body.clientId) {
+      return sendJSON(res, 400, { error: 'Un client est requis pour une vente à crédit' });
+    }
 
     // Validate stock availability before committing anything.
     for (const ci of cart) {
@@ -502,12 +506,35 @@ async function handleApi(req, res, pathname) {
       clientName,
       itemCount: cart.reduce((a, c) => a + c.qty, 0),
       total,
-      paymentMethod: body.paymentMethod || 'Espèces',
+      paymentMethod,
       items,
     };
+    if (paymentMethod === 'Crédit') {
+      sale.creditPaid = 0;
+      sale.creditRemaining = total;
+      sale.creditPayments = [];
+    }
     db.sales.unshift(sale);
     saveDB(db);
     return sendJSON(res, 201, { sale });
+  }
+
+  const creditPaymentMatch = pathname.match(/^\/api\/credit-sales\/([^/]+)\/payment$/);
+  if (creditPaymentMatch && method === 'POST') {
+    const sale = db.sales.find((s) => s.id === creditPaymentMatch[1]);
+    if (!sale) return sendJSON(res, 404, { error: 'Vente introuvable' });
+    if (sale.paymentMethod !== 'Crédit') return sendJSON(res, 400, { error: "Cette vente n'est pas une vente à crédit" });
+    const body = await readJSONBody(req);
+    const amount = Number(body.amount) || 0;
+    if (amount <= 0) return sendJSON(res, 400, { error: 'Montant invalide' });
+    if (amount > sale.creditRemaining) {
+      return sendJSON(res, 400, { error: `Le montant dépasse le solde restant (${sale.creditRemaining.toLocaleString('fr-FR')} FCFA)` });
+    }
+    sale.creditPayments.push({ id: uid('pay'), date: new Date().toISOString(), amount });
+    sale.creditPaid += amount;
+    sale.creditRemaining -= amount;
+    saveDB(db);
+    return sendJSON(res, 200, sale);
   }
 
   return sendJSON(res, 404, { error: 'Route inconnue' });
