@@ -84,7 +84,7 @@ const state = {
   editingEmployeeId: null, confirmDeleteEmployeeId: null,
   showAddDepot: false, ndName: '', ndAddress: '',
   showTransfer: false, trProductId: '', trFromDepotId: '', trToDepotId: '', trQty: '',
-  showRestock: false, rsProductId: '', rsDepotId: '', rsQty: '',
+  showRestock: false, rsProductId: '', rsDepotId: '', rsQty: '', rsUnit: 'detail',
   creditFilter: 'open', showCreditPayment: false, cpSaleId: '', cpAmount: '',
   showAddExpense: false, exCategory: EXPENSE_CATEGORIES[0], exCustomCategory: '', exAmount: '', exDepotId: '', exNote: '',
   pwCurrent: '', pwNew: '', pwConfirm: '', pwError: null, pwSuccess: null,
@@ -410,12 +410,16 @@ async function restockProduct() {
   if (qty <= 0) return;
   const product = state.products.find((p) => p.id === state.rsProductId);
   if (!product) return;
+  const unit = state.rsUnit;
+  const pkg = packagingFor(product, unit);
+  const baseQty = qty * pkg.multiplier;
   try {
-    const updated = await api('PATCH', `/api/products/${state.rsProductId}/stock`, { depotId: state.rsDepotId, delta: qty });
+    const updated = await api('PATCH', `/api/products/${state.rsProductId}/stock`, { depotId: state.rsDepotId, delta: baseQty });
     const idx = state.products.findIndex((p) => p.id === updated.id);
     if (idx >= 0) state.products[idx] = updated;
-    state.showRestock = false; state.rsProductId = ''; state.rsQty = '';
-    flashToast('Réapprovisionné : +' + qty + ' ' + product.name);
+    state.showRestock = false; state.rsProductId = ''; state.rsQty = ''; state.rsUnit = 'detail';
+    const label = unit !== 'detail' ? `${qty} ${pkg.label}(s) (${baseQty} unités)` : `${qty}`;
+    flashToast('Réapprovisionné : +' + label + ' ' + product.name);
     rerender();
   } catch (e) { flashToast(e.message); }
 }
@@ -920,12 +924,25 @@ function renderRestockForm() {
     .map((p) => `<option value="${p.id}"${state.rsProductId === p.id ? ' selected' : ''}>${esc(p.name)}</option>`).join('');
   const depotOptions = state.depots.map((d) => `<option value="${d.id}"${state.rsDepotId === d.id ? ' selected' : ''}>${esc(d.name)}</option>`).join('');
   const product = state.products.find((p) => p.id === state.rsProductId);
-  const currentHint = product && state.rsDepotId
-    ? `<div style="font-size:11.5px;color:var(--muted);grid-column:1/-1">Stock actuel au dépôt choisi : ${stockAt(product, state.rsDepotId)}</div>` : '';
+
+  let unitOptions = `<option value="detail"${state.rsUnit === 'detail' ? ' selected' : ''}>Détail (unité)</option>`;
+  if (product && product.unitsPerPack > 1) unitOptions += `<option value="pack"${state.rsUnit === 'pack' ? ' selected' : ''}>Paquet (${product.unitsPerPack})</option>`;
+  if (product && product.unitsPerCarton > 1) unitOptions += `<option value="carton"${state.rsUnit === 'carton' ? ' selected' : ''}>Carton (${product.unitsPerCarton})</option>`;
+  const unitSelectHtml = `<select id="field-rsUnit" class="field" data-bind="rsUnit">${unitOptions}</select>`;
+
+  const qtyPlaceholder = state.rsUnit === 'pack' ? 'Nombre de paquets reçus' : state.rsUnit === 'carton' ? 'Nombre de cartons reçus' : 'Quantité reçue (unités)';
+
+  let currentHint = '';
+  if (product && state.rsDepotId) {
+    const pkg = packagingFor(product, state.rsUnit);
+    const multiplierHint = state.rsUnit !== 'detail' ? ` (1 ${pkg.label} = ${pkg.multiplier} unités)` : '';
+    currentHint = `<div style="font-size:11.5px;color:var(--muted);grid-column:1/-1">Stock actuel au dépôt choisi : ${stockAt(product, state.rsDepotId)}${multiplierHint}</div>`;
+  }
   return `<div class="add-form cols-4">
     <select id="field-rsProductId" class="field" data-bind="rsProductId"><option value="">Choisir un produit</option>${productOptions}</select>
     <select id="field-rsDepotId" class="field" data-bind="rsDepotId"><option value="">Choisir un dépôt</option>${depotOptions}</select>
-    <input id="field-rsQty" class="field" type="number" placeholder="Quantité reçue" value="${esc(state.rsQty)}" data-bind="rsQty" />
+    ${unitSelectHtml}
+    <input id="field-rsQty" class="field" type="number" placeholder="${qtyPlaceholder}" value="${esc(state.rsQty)}" data-bind="rsQty" />
     <div class="save-btn" data-action="doRestock">Réapprovisionner</div>
     ${currentHint}
   </div>`;
@@ -1343,13 +1360,13 @@ const Actions = {
   toggleRestock: () => {
     state.showRestock = !state.showRestock;
     if (state.showRestock) {
-      state.rsProductId = ''; state.rsQty = '';
+      state.rsProductId = ''; state.rsQty = ''; state.rsUnit = 'detail';
       state.rsDepotId = state.stockDepotFilter !== 'all' ? state.stockDepotFilter : state.currentDepotId;
     }
     rerender();
   },
   quickRestock: (ds) => {
-    state.showRestock = true; state.rsProductId = ds.id; state.rsQty = '';
+    state.showRestock = true; state.rsProductId = ds.id; state.rsQty = ''; state.rsUnit = 'detail';
     state.rsDepotId = state.stockDepotFilter !== 'all' ? state.stockDepotFilter : state.currentDepotId;
     rerender();
   },
@@ -1431,6 +1448,10 @@ function onChange(e) {
     state.dashDepotFilter = el.value;
     state.repDepotFilter = el.value;
     state.expenseDepotFilter = el.value;
+  } else if (bind === 'rsProductId') {
+    // A unit picked for the previous product may not apply to the new one
+    // (e.g. it has no carton configured) — reset to avoid a stale mismatch.
+    state.rsUnit = 'detail';
   }
   rerender();
 }
