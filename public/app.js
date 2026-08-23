@@ -16,6 +16,7 @@ const ICON_EDIT = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" s
 const ICON_TRASH = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18"></path><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"></path><path d="M10 11v6M14 11v6"></path></svg>';
 const ICON_CHECK = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M20 6 9 17l-5-5"></path></svg>';
 const ICON_CLOSE = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M18 6 6 18M6 6l12 12"></path></svg>';
+const ICON_RESTOCK = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3"><path d="M12 4v11"></path><path d="M8 11l4 4 4-4"></path><path d="M4 18h16"></path></svg>';
 const ICON_CAMERA = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"></rect><rect x="14" y="3" width="7" height="7" rx="1"></rect><rect x="3" y="14" width="7" height="7" rx="1"></rect><path d="M14 14h3v3h-3zM20 14v7M14 20h4"></path></svg>';
 
 const CAT_ICONS = {
@@ -74,6 +75,7 @@ const state = {
   editingEmployeeId: null, confirmDeleteEmployeeId: null,
   showAddDepot: false, ndName: '', ndAddress: '',
   showTransfer: false, trProductId: '', trFromDepotId: '', trToDepotId: '', trQty: '',
+  showRestock: false, rsProductId: '', rsDepotId: '', rsQty: '',
   pwCurrent: '', pwNew: '', pwConfirm: '', pwError: null, pwSuccess: null,
   toast: null,
   showReceipt: false, lastReceipt: null,
@@ -331,6 +333,21 @@ async function stockTransfer() {
     if (idx >= 0) state.products[idx] = product;
     state.showTransfer = false; state.trProductId = ''; state.trQty = '';
     flashToast('Transfert effectué : ' + qty + ' unité(s)');
+    rerender();
+  } catch (e) { flashToast(e.message); }
+}
+async function restockProduct() {
+  if (!state.rsProductId || !state.rsDepotId) return;
+  const qty = Number(state.rsQty) || 0;
+  if (qty <= 0) return;
+  const product = state.products.find((p) => p.id === state.rsProductId);
+  if (!product) return;
+  try {
+    const updated = await api('PATCH', `/api/products/${state.rsProductId}/stock`, { depotId: state.rsDepotId, delta: qty });
+    const idx = state.products.findIndex((p) => p.id === updated.id);
+    if (idx >= 0) state.products[idx] = updated;
+    state.showRestock = false; state.rsProductId = ''; state.rsQty = '';
+    flashToast('Réapprovisionné : +' + qty + ' ' + product.name);
     rerender();
   } catch (e) { flashToast(e.message); }
 }
@@ -704,6 +721,7 @@ function renderStocks() {
       : `<div class="stepper">
           <div class="stepper-btn" data-action="stockDec" data-id="${p.id}">−</div>
           <div class="stepper-btn" data-action="stockInc" data-id="${p.id}">+</div>
+          <div class="stepper-btn" style="color:var(--green)" data-action="quickRestock" data-id="${p.id}" title="Réapprovisionner">${ICON_RESTOCK}</div>
         </div>`;
     return `<tr>
       <td style="font-weight:600">${esc(p.name)}</td>
@@ -728,6 +746,7 @@ function renderStocks() {
   </div>` : '';
 
   const transferHtml = state.showTransfer && state.role === 'manager' ? renderTransferForm() : '';
+  const restockHtml = state.showRestock ? renderRestockForm() : '';
 
   return `<div>
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;flex-wrap:wrap;gap:10px">
@@ -741,10 +760,12 @@ function renderStocks() {
       </div>
       <div style="display:flex;gap:10px">
         ${state.depots.length > 1 && state.role === 'manager' ? `<div class="add-btn" style="background:#fff;color:var(--green);border:1px solid var(--border)" data-action="toggleTransfer">⇄ Transférer du stock</div>` : ''}
+        <div class="add-btn" style="background:#fff;color:var(--green);border:1px solid var(--border)" data-action="toggleRestock">↓ Réapprovisionner</div>
         <div class="add-btn" data-action="toggleAddProduct">+ Ajouter un produit</div>
       </div>
     </div>
     ${transferHtml}
+    ${restockHtml}
     ${addFormHtml}
     <div class="table-card"><table class="data-table">
       <tr><th>PRODUIT</th><th>CATÉGORIE</th><th class="right">PRIX</th><th class="center">STOCK</th><th class="center">STATUT</th><th class="center">AJUSTER</th></tr>
@@ -768,6 +789,22 @@ function renderTransferForm() {
     <input id="field-trQty" class="field" type="number" placeholder="Quantité" value="${esc(state.trQty)}" data-bind="trQty" />
     ${availableHint}
     <div class="save-btn" data-action="doTransfer">Transférer</div>
+  </div>`;
+}
+
+function renderRestockForm() {
+  const productOptions = state.products.slice().sort((a, b) => a.name.localeCompare(b.name))
+    .map((p) => `<option value="${p.id}"${state.rsProductId === p.id ? ' selected' : ''}>${esc(p.name)}</option>`).join('');
+  const depotOptions = state.depots.map((d) => `<option value="${d.id}"${state.rsDepotId === d.id ? ' selected' : ''}>${esc(d.name)}</option>`).join('');
+  const product = state.products.find((p) => p.id === state.rsProductId);
+  const currentHint = product && state.rsDepotId
+    ? `<div style="font-size:11.5px;color:var(--muted);grid-column:1/-1">Stock actuel au dépôt choisi : ${stockAt(product, state.rsDepotId)}</div>` : '';
+  return `<div class="add-form cols-4">
+    <select id="field-rsProductId" class="field" data-bind="rsProductId"><option value="">Choisir un produit</option>${productOptions}</select>
+    <select id="field-rsDepotId" class="field" data-bind="rsDepotId"><option value="">Choisir un dépôt</option>${depotOptions}</select>
+    <input id="field-rsQty" class="field" type="number" placeholder="Quantité reçue" value="${esc(state.rsQty)}" data-bind="rsQty" />
+    <div class="save-btn" data-action="doRestock">Réapprovisionner</div>
+    ${currentHint}
   </div>`;
 }
 
@@ -1051,6 +1088,20 @@ const Actions = {
   stockInc: (ds) => adjustStock(ds.id, 1, state.stockDepotFilter),
   toggleTransfer: () => { state.showTransfer = !state.showTransfer; rerender(); },
   doTransfer: () => stockTransfer(),
+  toggleRestock: () => {
+    state.showRestock = !state.showRestock;
+    if (state.showRestock) {
+      state.rsProductId = ''; state.rsQty = '';
+      state.rsDepotId = state.stockDepotFilter !== 'all' ? state.stockDepotFilter : state.currentDepotId;
+    }
+    rerender();
+  },
+  quickRestock: (ds) => {
+    state.showRestock = true; state.rsProductId = ds.id; state.rsQty = '';
+    state.rsDepotId = state.stockDepotFilter !== 'all' ? state.stockDepotFilter : state.currentDepotId;
+    rerender();
+  },
+  doRestock: () => restockProduct(),
   toggleAddDepot: () => { state.showAddDepot = !state.showAddDepot; rerender(); },
   addDepot: () => addDepot(),
   toggleAddCategory: () => { state.showAddCategory = !state.showAddCategory; rerender(); },
