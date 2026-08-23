@@ -70,16 +70,16 @@ function buildSeed() {
     { id: 's7', name: 'Confiserie Plus', phone: '+226 70 77 88 99', email: 'contact@confiserieplus.bf' },
   ];
   const productsRaw = [
-    { id: 'p1', name: 'Coca-Cola 50cl', categoryId: 'c1', supplierId: 's1', price: 500, cost: 350, stock: 120, minStock: 30, sold: 210 },
-    { id: 'p2', name: 'Fanta Orange 50cl', categoryId: 'c1', supplierId: 's1', price: 500, cost: 350, stock: 85, minStock: 30, sold: 150 },
-    { id: 'p3', name: 'Sprite 50cl', categoryId: 'c1', supplierId: 's1', price: 500, cost: 350, stock: 60, minStock: 30, sold: 98 },
+    { id: 'p1', name: 'Coca-Cola 50cl', categoryId: 'c1', supplierId: 's1', price: 500, cost: 350, stock: 120, minStock: 30, sold: 210, unitsPerPack: 6, pricePerPack: 2700, unitsPerCarton: 24, pricePerCarton: 10500 },
+    { id: 'p2', name: 'Fanta Orange 50cl', categoryId: 'c1', supplierId: 's1', price: 500, cost: 350, stock: 85, minStock: 30, sold: 150, unitsPerPack: 6, pricePerPack: 2700, unitsPerCarton: 24, pricePerCarton: 10500 },
+    { id: 'p3', name: 'Sprite 50cl', categoryId: 'c1', supplierId: 's1', price: 500, cost: 350, stock: 60, minStock: 30, sold: 98, unitsPerPack: 6, pricePerPack: 2700, unitsPerCarton: 24, pricePerCarton: 10500 },
     { id: 'p4', name: 'Pulpy Orange 50cl', categoryId: 'c1', supplierId: 's1', price: 600, cost: 420, stock: 15, minStock: 20, sold: 64 },
-    { id: 'p5', name: 'Castel Beer 65cl', categoryId: 'c2', supplierId: 's2', price: 700, cost: 480, stock: 200, minStock: 40, sold: 340 },
-    { id: 'p6', name: 'Guinness 33cl', categoryId: 'c2', supplierId: 's2', price: 900, cost: 620, stock: 55, minStock: 25, sold: 180 },
-    { id: 'p7', name: 'Heineken 33cl', categoryId: 'c2', supplierId: 's2', price: 1000, cost: 700, stock: 8, minStock: 20, sold: 96 },
-    { id: 'p8', name: 'Beaufort 65cl', categoryId: 'c2', supplierId: 's2', price: 650, cost: 450, stock: 130, minStock: 30, sold: 220 },
-    { id: 'p9', name: 'Eau Vive 1.5L', categoryId: 'c3', supplierId: 's3', price: 350, cost: 220, stock: 300, minStock: 50, sold: 410 },
-    { id: 'p10', name: 'Eau Vive 50cl', categoryId: 'c3', supplierId: 's3', price: 200, cost: 120, stock: 250, minStock: 50, sold: 330 },
+    { id: 'p5', name: 'Castel Beer 65cl', categoryId: 'c2', supplierId: 's2', price: 700, cost: 480, stock: 200, minStock: 40, sold: 340, unitsPerCarton: 12, pricePerCarton: 7800 },
+    { id: 'p6', name: 'Guinness 33cl', categoryId: 'c2', supplierId: 's2', price: 900, cost: 620, stock: 55, minStock: 25, sold: 180, unitsPerCarton: 12, pricePerCarton: 10000 },
+    { id: 'p7', name: 'Heineken 33cl', categoryId: 'c2', supplierId: 's2', price: 1000, cost: 700, stock: 8, minStock: 20, sold: 96, unitsPerCarton: 12, pricePerCarton: 11000 },
+    { id: 'p8', name: 'Beaufort 65cl', categoryId: 'c2', supplierId: 's2', price: 650, cost: 450, stock: 130, minStock: 30, sold: 220, unitsPerCarton: 12, pricePerCarton: 7200 },
+    { id: 'p9', name: 'Eau Vive 1.5L', categoryId: 'c3', supplierId: 's3', price: 350, cost: 220, stock: 300, minStock: 50, sold: 410, unitsPerPack: 6, pricePerPack: 1950, unitsPerCarton: 12, pricePerCarton: 3800 },
+    { id: 'p10', name: 'Eau Vive 50cl', categoryId: 'c3', supplierId: 's3', price: 200, cost: 120, stock: 250, minStock: 50, sold: 330, unitsPerPack: 12, pricePerPack: 2200, unitsPerCarton: 24, pricePerCarton: 4200 },
     { id: 'p11', name: 'Awa 1.5L', categoryId: 'c3', supplierId: 's3', price: 350, cost: 220, stock: 40, minStock: 40, sold: 120 },
     { id: 'p12', name: 'Youki Ananas 1L', categoryId: 'c4', supplierId: 's4', price: 1200, cost: 850, stock: 45, minStock: 20, sold: 88 },
     { id: 'p13', name: 'Youki Cocktail 1L', categoryId: 'c4', supplierId: 's4', price: 1200, cost: 850, stock: 38, minStock: 20, sold: 76 },
@@ -96,7 +96,7 @@ function buildSeed() {
   ];
   const products = productsRaw.map((p, i) => {
     const { stock, ...rest } = p;
-    return Object.assign({}, rest, {
+    return Object.assign({ unitsPerPack: 0, pricePerPack: 0, unitsPerCarton: 0, pricePerCarton: 0 }, rest, {
       stockByDepot: splitStock(stock, depotIds, [0.6]),
       barcode: '20000000000' + String(i + 1).padStart(2, '0'),
     });
@@ -222,6 +222,12 @@ function loadDB() {
   const data = JSON.parse(fs.readFileSync(DB_PATH, 'utf8'));
   let changed = migrateToDepots(data);
   if (!Array.isArray(data.expenses)) { data.expenses = []; changed = true; }
+  (data.products || []).forEach((p) => {
+    if (p.unitsPerPack === undefined) {
+      p.unitsPerPack = 0; p.pricePerPack = 0; p.unitsPerCarton = 0; p.pricePerCarton = 0;
+      changed = true;
+    }
+  });
   if (changed) fs.writeFileSync(DB_PATH, JSON.stringify(data, null, 2));
   return data;
 }
@@ -256,6 +262,14 @@ function readJSONBody(req) {
 }
 function stockAt(product, depotId) {
   return (product.stockByDepot && product.stockByDepot[depotId]) || 0;
+}
+// Resolves the unit price and base-unit multiplier for a cart line's sale
+// unit ('pack'/'carton'), falling back to the per-unit ('detail') price if
+// the product doesn't have that packaging configured.
+function packagingInfo(product, unit) {
+  if (unit === 'pack' && product.unitsPerPack > 0) return { price: product.pricePerPack, multiplier: product.unitsPerPack };
+  if (unit === 'carton' && product.unitsPerCarton > 0) return { price: product.pricePerCarton, multiplier: product.unitsPerCarton };
+  return { price: product.price, multiplier: 1 };
 }
 // True if removing/demoting/deactivating employeeId would leave zero active Gérant accounts.
 function lastActiveManager(employeeId) {
@@ -444,10 +458,37 @@ async function handleApi(req, res, pathname) {
       minStock: Number(body.minStock) || 10,
       sold: 0,
       barcode: uid('bc').slice(0, 13),
+      unitsPerPack: Number(body.unitsPerPack) || 0,
+      pricePerPack: Number(body.pricePerPack) || 0,
+      unitsPerCarton: Number(body.unitsPerCarton) || 0,
+      pricePerCarton: Number(body.pricePerCarton) || 0,
     };
     db.products.push(product);
     saveDB(db);
     return sendJSON(res, 201, product);
+  }
+
+  const productUpdateMatch = pathname.match(/^\/api\/products\/([^/]+)$/);
+  if (productUpdateMatch && method === 'PATCH') {
+    const product = db.products.find((p) => p.id === productUpdateMatch[1]);
+    if (!product) return sendJSON(res, 404, { error: 'Produit introuvable' });
+    const body = await readJSONBody(req);
+    if (body.name !== undefined) {
+      const name = body.name.trim();
+      if (!name) return sendJSON(res, 400, { error: 'Nom requis' });
+      product.name = name;
+    }
+    if (body.categoryId !== undefined) product.categoryId = body.categoryId;
+    if (body.supplierId !== undefined) product.supplierId = body.supplierId;
+    if (body.price !== undefined) product.price = Number(body.price) || 0;
+    if (body.cost !== undefined) product.cost = Number(body.cost) || 0;
+    if (body.minStock !== undefined) product.minStock = Number(body.minStock) || 0;
+    if (body.unitsPerPack !== undefined) product.unitsPerPack = Number(body.unitsPerPack) || 0;
+    if (body.pricePerPack !== undefined) product.pricePerPack = Number(body.pricePerPack) || 0;
+    if (body.unitsPerCarton !== undefined) product.unitsPerCarton = Number(body.unitsPerCarton) || 0;
+    if (body.pricePerCarton !== undefined) product.pricePerCarton = Number(body.pricePerCarton) || 0;
+    saveDB(db);
+    return sendJSON(res, 200, product);
   }
 
   const stockMatch = pathname.match(/^\/api\/products\/([^/]+)\/stock$/);
@@ -494,10 +535,12 @@ async function handleApi(req, res, pathname) {
     for (const ci of cart) {
       const product = db.products.find((p) => p.id === ci.productId);
       if (!product) return sendJSON(res, 400, { error: 'Produit introuvable : ' + ci.productId });
-      if (ci.qty <= 0 || ci.qty > stockAt(product, depot.id)) {
+      const pkg = packagingInfo(product, ci.unit);
+      const baseQty = ci.qty * pkg.multiplier;
+      if (ci.qty <= 0 || baseQty > stockAt(product, depot.id)) {
         return sendJSON(res, 409, { error: 'Stock insuffisant pour ' + product.name + ' au ' + depot.name });
       }
-      precomputedTotal += product.price * ci.qty;
+      precomputedTotal += pkg.price * ci.qty;
     }
     let advance = 0;
     if (paymentMethod === 'Crédit') {
@@ -509,11 +552,13 @@ async function handleApi(req, res, pathname) {
     let total = 0;
     const items = cart.map((ci) => {
       const product = db.products.find((p) => p.id === ci.productId);
-      product.stockByDepot[depot.id] = stockAt(product, depot.id) - ci.qty;
-      product.sold += ci.qty;
-      const lineTotal = product.price * ci.qty;
+      const pkg = packagingInfo(product, ci.unit);
+      const baseQty = ci.qty * pkg.multiplier;
+      product.stockByDepot[depot.id] = stockAt(product, depot.id) - baseQty;
+      product.sold += baseQty;
+      const lineTotal = pkg.price * ci.qty;
       total += lineTotal;
-      return { productId: product.id, name: product.name, qty: ci.qty, unitPrice: product.price, lineTotal };
+      return { productId: product.id, name: product.name, unit: ci.unit || 'detail', qty: ci.qty, unitPrice: pkg.price, lineTotal, baseQty };
     });
 
     let clientName = '';
@@ -534,7 +579,7 @@ async function handleApi(req, res, pathname) {
       depotName: depot.name,
       clientId: body.clientId || '',
       clientName,
-      itemCount: cart.reduce((a, c) => a + c.qty, 0),
+      itemCount: items.reduce((a, it) => a + it.baseQty, 0),
       total,
       paymentMethod,
       items,

@@ -76,6 +76,7 @@ const state = {
   scanInput: '', showScanner: false, scanError: null,
   stockSearch: '', stockCatFilter: 'all', showAddProduct: false,
   npName: '', npCategoryId: '', npSupplierId: '', npDepotId: '', npPrice: '', npCost: '', npStock: '', npMinStock: '',
+  npUnitsPerPack: '', npPricePerPack: '', npUnitsPerCarton: '', npPricePerCarton: '', editingProductId: null,
   showAddCategory: false, ncName: '',
   showAddSupplier: false, nsName: '', nsPhone: '', nsEmail: '',
   showAddClient: false, ncliName: '', ncliPhone: '',
@@ -207,31 +208,40 @@ async function changePassword() {
 }
 
 // ---------- Cart / POS ----------
-function addToCart(productId) {
+// Resolves the unit price and base-unit multiplier for a sale unit
+// ('pack'/'carton'), falling back to the per-unit ('detail') price if the
+// product doesn't have that packaging configured — mirrors server.js.
+function packagingFor(product, unit) {
+  if (unit === 'pack' && product.unitsPerPack > 0) return { price: product.pricePerPack, multiplier: product.unitsPerPack, label: 'paquet' };
+  if (unit === 'carton' && product.unitsPerCarton > 0) return { price: product.pricePerCarton, multiplier: product.unitsPerCarton, label: 'carton' };
+  return { price: product.price, multiplier: 1, label: 'unité' };
+}
+function addToCart(productId, unit) {
   const product = state.products.find((p) => p.id === productId);
   if (!product) return;
+  unit = unit || 'detail';
+  const pkg = packagingFor(product, unit);
   const available = stockAt(product, state.currentDepotId);
-  if (available <= 0) return;
-  const existing = state.cart.find((c) => c.productId === productId);
-  if (existing) {
-    if (existing.qty >= available) return;
-    existing.qty++;
-  } else {
-    state.cart.push({ productId, qty: 1 });
-  }
+  const existing = state.cart.find((c) => c.productId === productId && c.unit === unit);
+  const usedBase = existing ? existing.qty * pkg.multiplier : 0;
+  if (usedBase + pkg.multiplier > available) return;
+  if (existing) existing.qty++;
+  else state.cart.push({ productId, unit, qty: 1 });
   rerender();
 }
-function changeCartQty(productId, delta) {
+function changeCartQty(productId, unit, delta) {
   const product = state.products.find((p) => p.id === productId);
-  const item = state.cart.find((c) => c.productId === productId);
+  const item = state.cart.find((c) => c.productId === productId && c.unit === unit);
   if (!item || !product) return;
+  const pkg = packagingFor(product, unit);
   const available = stockAt(product, state.currentDepotId);
-  item.qty = Math.max(0, Math.min(available, item.qty + delta));
+  const maxQty = Math.floor(available / pkg.multiplier);
+  item.qty = Math.max(0, Math.min(maxQty, item.qty + delta));
   state.cart = state.cart.filter((c) => c.qty > 0);
   rerender();
 }
-function removeFromCart(productId) {
-  state.cart = state.cart.filter((c) => c.productId !== productId);
+function removeFromCart(productId, unit) {
+  state.cart = state.cart.filter((c) => !(c.productId === productId && c.unit === unit));
   rerender();
 }
 async function checkout() {
@@ -248,7 +258,7 @@ async function checkout() {
     const sale = data.sale;
     sale.items.forEach((it) => {
       const p = state.products.find((pp) => pp.id === it.productId);
-      if (p) { p.stockByDepot[sale.depotId] = stockAt(p, sale.depotId) - it.qty; p.sold += it.qty; }
+      if (p) { p.stockByDepot[sale.depotId] = stockAt(p, sale.depotId) - it.baseQty; p.sold += it.baseQty; }
     });
     if (sale.clientId) {
       const c = state.clients.find((cc) => cc.id === sale.clientId);
@@ -321,17 +331,60 @@ function adjustStock(productId, delta, depotId) {
   rerender();
   api('PATCH', `/api/products/${productId}/stock`, { depotId, delta }).catch(() => flashToast('Erreur de synchronisation du stock'));
 }
+function resetProductForm() {
+  state.showAddProduct = false; state.editingProductId = null;
+  state.npName = ''; state.npPrice = ''; state.npCost = ''; state.npStock = ''; state.npMinStock = '';
+  state.npUnitsPerPack = ''; state.npPricePerPack = ''; state.npUnitsPerCarton = ''; state.npPricePerCarton = '';
+}
+function openAddProductForm() {
+  resetProductForm();
+  state.npCategoryId = state.categories[0] ? state.categories[0].id : '';
+  state.npSupplierId = state.suppliers[0] ? state.suppliers[0].id : '';
+  state.npDepotId = state.currentDepotId;
+  state.showAddProduct = true;
+}
+function openEditProductForm(id) {
+  const p = state.products.find((pp) => pp.id === id);
+  if (!p) return;
+  resetProductForm();
+  state.editingProductId = id;
+  state.npName = p.name; state.npCategoryId = p.categoryId; state.npSupplierId = p.supplierId;
+  state.npPrice = p.price; state.npCost = p.cost; state.npMinStock = p.minStock;
+  state.npUnitsPerPack = p.unitsPerPack || ''; state.npPricePerPack = p.pricePerPack || '';
+  state.npUnitsPerCarton = p.unitsPerCarton || ''; state.npPricePerCarton = p.pricePerCarton || '';
+  state.showAddProduct = true;
+}
+function saveProduct() {
+  return state.editingProductId ? updateProduct() : addProduct();
+}
 async function addProduct() {
   if (!state.npName.trim()) return;
   try {
     const product = await api('POST', '/api/products', {
       name: state.npName.trim(), categoryId: state.npCategoryId, supplierId: state.npSupplierId, depotId: state.npDepotId,
       price: Number(state.npPrice) || 0, cost: Number(state.npCost) || 0, stock: Number(state.npStock) || 0, minStock: Number(state.npMinStock) || 10,
+      unitsPerPack: Number(state.npUnitsPerPack) || 0, pricePerPack: Number(state.npPricePerPack) || 0,
+      unitsPerCarton: Number(state.npUnitsPerCarton) || 0, pricePerCarton: Number(state.npPricePerCarton) || 0,
     });
     state.products.push(product);
-    state.showAddProduct = false;
-    state.npName = ''; state.npPrice = ''; state.npCost = ''; state.npStock = ''; state.npMinStock = '';
+    resetProductForm();
     flashToast('Produit ajouté : ' + product.name);
+    rerender();
+  } catch (e) { flashToast(e.message); }
+}
+async function updateProduct() {
+  if (!state.npName.trim()) return;
+  try {
+    const updated = await api('PATCH', `/api/products/${state.editingProductId}`, {
+      name: state.npName.trim(), categoryId: state.npCategoryId, supplierId: state.npSupplierId,
+      price: Number(state.npPrice) || 0, cost: Number(state.npCost) || 0, minStock: Number(state.npMinStock) || 10,
+      unitsPerPack: Number(state.npUnitsPerPack) || 0, pricePerPack: Number(state.npPricePerPack) || 0,
+      unitsPerCarton: Number(state.npUnitsPerCarton) || 0, pricePerCarton: Number(state.npPricePerCarton) || 0,
+    });
+    const idx = state.products.findIndex((p) => p.id === updated.id);
+    if (idx >= 0) state.products[idx] = updated;
+    resetProductForm();
+    flashToast('Produit mis à jour : ' + updated.name);
     rerender();
   } catch (e) { flashToast(e.message); }
 }
@@ -690,31 +743,38 @@ function renderCaisse() {
     const qty = stockAt(p, state.currentDepotId);
     const disabled = qty <= 0;
     const cat = catById[p.categoryId];
-    return `<div class="pos-product-card${disabled ? ' disabled' : ''}"${disabled ? '' : ` data-action="addToCart" data-id="${p.id}"`}>
+    const packHtml = (!disabled && p.unitsPerPack > 1 && qty >= p.unitsPerPack)
+      ? `<div class="pos-unit-chip" data-action="addToCart" data-id="${p.id}" data-unit="pack" title="Ajouter un paquet de ${p.unitsPerPack}">Paquet (${p.unitsPerPack}) · ${fcfa(p.pricePerPack)}</div>` : '';
+    const cartonHtml = (!disabled && p.unitsPerCarton > 1 && qty >= p.unitsPerCarton)
+      ? `<div class="pos-unit-chip" data-action="addToCart" data-id="${p.id}" data-unit="carton" title="Ajouter un carton de ${p.unitsPerCarton}">Carton (${p.unitsPerCarton}) · ${fcfa(p.pricePerCarton)}</div>` : '';
+    return `<div class="pos-product-card${disabled ? ' disabled' : ''}"${disabled ? '' : ` data-action="addToCart" data-id="${p.id}" data-unit="detail"`}>
       <div class="pos-product-dot" style="background:${cat ? cat.color : '#888'}"></div>
       <div class="pos-product-name">${esc(p.name)}</div>
       <div class="pos-product-stock">${disabled ? 'Rupture de stock' : qty + ' en stock'}</div>
       <div class="pos-product-price">${fcfa(p.price)}</div>
+      ${(packHtml || cartonHtml) ? `<div class="pos-unit-chips">${packHtml}${cartonHtml}</div>` : ''}
     </div>`;
   }).join('');
 
   const cartHtml = state.cart.length ? state.cart.map((ci) => {
     const p = state.products.find((pp) => pp.id === ci.productId);
     if (!p) return '';
+    const pkg = packagingFor(p, ci.unit);
+    const unitLabel = ci.unit === 'pack' ? 'paquet' : ci.unit === 'carton' ? 'carton' : 'unité';
     return `<div class="cart-row">
-      <div style="flex:1;min-width:0"><div class="cart-row-name">${esc(p.name)}</div><div class="cart-row-price">${fcfa(p.price)} / unité</div></div>
+      <div style="flex:1;min-width:0"><div class="cart-row-name">${esc(p.name)}</div><div class="cart-row-price">${fcfa(pkg.price)} / ${unitLabel}${ci.unit !== 'detail' ? ` <span class="cart-row-unit">(${pkg.multiplier} u.)</span>` : ''}</div></div>
       <div class="stepper">
-        <div class="stepper-btn" data-action="cartMinus" data-id="${p.id}">−</div>
+        <div class="stepper-btn" data-action="cartMinus" data-id="${p.id}" data-unit="${ci.unit}">−</div>
         <div style="width:22px;text-align:center;font-size:13px;font-weight:700">${ci.qty}</div>
-        <div class="stepper-btn" data-action="cartPlus" data-id="${p.id}">+</div>
+        <div class="stepper-btn" data-action="cartPlus" data-id="${p.id}" data-unit="${ci.unit}">+</div>
       </div>
-      <div class="cart-row-total">${fcfa(p.price * ci.qty)}</div>
-      <div class="cart-row-remove" data-action="cartRemove" data-id="${p.id}">×</div>
+      <div class="cart-row-total">${fcfa(pkg.price * ci.qty)}</div>
+      <div class="cart-row-remove" data-action="cartRemove" data-id="${p.id}" data-unit="${ci.unit}">×</div>
     </div>`;
   }).join('') : `<div class="cart-empty">Le panier est vide.<br/>Cliquez sur un produit pour l'ajouter.</div>`;
 
-  const cartCount = state.cart.reduce((a, c) => a + c.qty, 0);
-  const cartTotal = state.cart.reduce((a, ci) => { const p = state.products.find((pp) => pp.id === ci.productId); return a + (p ? p.price * ci.qty : 0); }, 0);
+  const cartCount = state.cart.reduce((a, c) => { const p = state.products.find((pp) => pp.id === c.productId); return a + (p ? c.qty * packagingFor(p, c.unit).multiplier : 0); }, 0);
+  const cartTotal = state.cart.reduce((a, ci) => { const p = state.products.find((pp) => pp.id === ci.productId); return a + (p ? packagingFor(p, ci.unit).price * ci.qty : 0); }, 0);
   const clientOptions = state.clients.map((c) => `<option value="${c.id}"${state.posClientId === c.id ? ' selected' : ''}>${esc(c.name)} (${c.points} pts)</option>`).join('');
   const errorHtml = state.scanError
     ? `<div class="pos-error">${esc(state.scanError)}</div>`
@@ -779,8 +839,10 @@ function renderStocks() {
           <div class="stepper-btn" data-action="stockInc" data-id="${p.id}">+</div>
           <div class="stepper-btn" style="color:var(--green)" data-action="quickRestock" data-id="${p.id}" title="Réapprovisionner">${ICON_RESTOCK}</div>
         </div>`;
+    const packagingHint = (p.unitsPerPack > 1 || p.unitsPerCarton > 1)
+      ? `<div style="font-size:10.5px;color:var(--muted)">${p.unitsPerPack > 1 ? `paquet ${p.unitsPerPack}` : ''}${p.unitsPerPack > 1 && p.unitsPerCarton > 1 ? ' · ' : ''}${p.unitsPerCarton > 1 ? `carton ${p.unitsPerCarton}` : ''}</div>` : '';
     return `<tr>
-      <td style="font-weight:600">${esc(p.name)}</td>
+      <td style="font-weight:600">${esc(p.name)} <span style="cursor:pointer;color:var(--muted);vertical-align:middle" data-action="editProduct" data-id="${p.id}" title="Modifier">${ICON_EDIT}</span>${packagingHint}</td>
       <td><span class="dot" style="background:${cat ? cat.color : '#888'}"></span>${cat ? esc(cat.name) : '—'}</td>
       <td class="right">${fcfa(p.price)}</td>
       <td class="center" style="font-weight:700">${qty}</td>
@@ -789,16 +851,21 @@ function renderStocks() {
     </tr>`;
   }).join('');
 
+  const isEditingProduct = !!state.editingProductId;
   const addFormHtml = state.showAddProduct ? `<div class="add-form cols-4">
     <input id="field-npName" class="field" type="text" placeholder="Nom du produit" value="${esc(state.npName)}" data-bind="npName" />
     <select id="field-npCategoryId" class="field" data-bind="npCategoryId">${npCatOptions}</select>
     <select id="field-npSupplierId" class="field" data-bind="npSupplierId">${npSupOptions}</select>
-    <select id="field-npDepotId" class="field" data-bind="npDepotId" title="Dépôt de réception du stock initial">${npDepotOptions}</select>
-    <input id="field-npPrice" class="field" type="number" placeholder="Prix vente (FCFA)" value="${esc(state.npPrice)}" data-bind="npPrice" />
+    ${isEditingProduct ? '' : `<select id="field-npDepotId" class="field" data-bind="npDepotId" title="Dépôt de réception du stock initial">${npDepotOptions}</select>`}
+    <input id="field-npPrice" class="field" type="number" placeholder="Prix vente au détail (FCFA)" value="${esc(state.npPrice)}" data-bind="npPrice" />
     <input id="field-npCost" class="field" type="number" placeholder="Prix achat (FCFA)" value="${esc(state.npCost)}" data-bind="npCost" />
-    <input id="field-npStock" class="field" type="number" placeholder="Stock initial" value="${esc(state.npStock)}" data-bind="npStock" />
+    ${isEditingProduct ? '' : `<input id="field-npStock" class="field" type="number" placeholder="Stock initial" value="${esc(state.npStock)}" data-bind="npStock" />`}
     <input id="field-npMinStock" class="field" type="number" placeholder="Seuil minimum" value="${esc(state.npMinStock)}" data-bind="npMinStock" />
-    <div class="save-btn" data-action="addProduct">Enregistrer</div>
+    <input id="field-npUnitsPerPack" class="field" type="number" placeholder="Unités par paquet (optionnel)" value="${esc(state.npUnitsPerPack)}" data-bind="npUnitsPerPack" />
+    <input id="field-npPricePerPack" class="field" type="number" placeholder="Prix du paquet (FCFA)" value="${esc(state.npPricePerPack)}" data-bind="npPricePerPack" />
+    <input id="field-npUnitsPerCarton" class="field" type="number" placeholder="Unités par carton (optionnel)" value="${esc(state.npUnitsPerCarton)}" data-bind="npUnitsPerCarton" />
+    <input id="field-npPricePerCarton" class="field" type="number" placeholder="Prix du carton (FCFA)" value="${esc(state.npPricePerCarton)}" data-bind="npPricePerCarton" />
+    <div class="save-btn" data-action="saveProduct">${isEditingProduct ? 'Mettre à jour' : 'Enregistrer'}</div>
   </div>` : '';
 
   const transferHtml = state.showTransfer && state.role === 'manager' ? renderTransferForm() : '';
@@ -1078,7 +1145,7 @@ function renderRapports() {
   // they always cover every depot's full history, not just this filter.
   const soldMap = {}, revMap = {};
   state.sales.forEach((sa) => (sa.items || []).forEach((it) => {
-    soldMap[it.productId] = (soldMap[it.productId] || 0) + it.qty;
+    soldMap[it.productId] = (soldMap[it.productId] || 0) + (it.baseQty != null ? it.baseQty : it.qty);
     revMap[it.productId] = (revMap[it.productId] || 0) + it.lineTotal;
   }));
   const catRevenue = state.categories.map((c) => {
@@ -1203,10 +1270,14 @@ function renderReceiptModal() {
   const dateObj = new Date(r.date);
   const dateLabel = dateObj.toLocaleDateString('fr-FR');
   const timeLabel = dateObj.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' });
-  const itemsHtml = r.items.map((it) => `<div class="receipt-item">
+  const itemsHtml = r.items.map((it) => {
+    const unitLabel = it.unit === 'pack' ? 'paquet' : it.unit === 'carton' ? 'carton' : null;
+    const qtyLabel = unitLabel ? `${it.qty} ${unitLabel}${it.qty > 1 ? 's' : ''}` : `${it.qty}`;
+    return `<div class="receipt-item">
     <div class="receipt-item-top"><span>${esc(it.name)}</span><span>${fcfa(it.lineTotal)}</span></div>
-    <div class="receipt-item-sub"><span>${it.qty} × ${fcfa(it.unitPrice)}</span></div>
-  </div>`).join('');
+    <div class="receipt-item-sub"><span>${qtyLabel} × ${fcfa(it.unitPrice)}</span></div>
+  </div>`;
+  }).join('');
   const clientRow = r.clientName ? `<div class="receipt-meta-row"><span>Client</span><span>${esc(r.clientName)}</span></div>` : '';
   return `<div class="modal-overlay no-print">
     <div class="modal-card receipt-modal">
@@ -1251,10 +1322,10 @@ const Actions = {
   nav: (ds) => { state.screen = ds.screen; state.pwError = null; state.pwSuccess = null; state.confirmDeleteEmployeeId = null; rerender(); },
   setPosCatAll: () => { state.posCategory = 'all'; rerender(); },
   setPosCategory: (ds) => { state.posCategory = ds.id; rerender(); },
-  addToCart: (ds) => addToCart(ds.id),
-  cartMinus: (ds) => changeCartQty(ds.id, -1),
-  cartPlus: (ds) => changeCartQty(ds.id, 1),
-  cartRemove: (ds) => removeFromCart(ds.id),
+  addToCart: (ds) => addToCart(ds.id, ds.unit),
+  cartMinus: (ds) => changeCartQty(ds.id, ds.unit, -1),
+  cartPlus: (ds) => changeCartQty(ds.id, ds.unit, 1),
+  cartRemove: (ds) => removeFromCart(ds.id, ds.unit),
   setPayCash: () => { state.paymentMethod = 'Espèces'; state.posAdvance = ''; rerender(); },
   setPayMobile: () => { state.paymentMethod = 'Mobile Money'; state.posAdvance = ''; rerender(); },
   setPayCard: () => { state.paymentMethod = 'Carte'; state.posAdvance = ''; rerender(); },
@@ -1262,8 +1333,9 @@ const Actions = {
   checkout: () => checkout(),
   openScanner: () => { state.showScanner = true; state.scanError = null; rerender(); },
   closeScanner: () => { state.showScanner = false; state.scanError = null; rerender(); },
-  toggleAddProduct: () => { state.showAddProduct = !state.showAddProduct; rerender(); },
-  addProduct: () => addProduct(),
+  toggleAddProduct: () => { if (state.showAddProduct) resetProductForm(); else openAddProductForm(); rerender(); },
+  editProduct: (ds) => { openEditProductForm(ds.id); rerender(); },
+  saveProduct: () => saveProduct(),
   stockDec: (ds) => adjustStock(ds.id, -1, state.stockDepotFilter),
   stockInc: (ds) => adjustStock(ds.id, 1, state.stockDepotFilter),
   toggleTransfer: () => { state.showTransfer = !state.showTransfer; rerender(); },
