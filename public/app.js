@@ -19,6 +19,9 @@ const ICON_CLOSE = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" 
 const ICON_RESTOCK = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3"><path d="M12 4v11"></path><path d="M8 11l4 4 4-4"></path><path d="M4 18h16"></path></svg>';
 const ICON_CAMERA = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"></rect><rect x="14" y="3" width="7" height="7" rx="1"></rect><rect x="3" y="14" width="7" height="7" rx="1"></rect><path d="M14 14h3v3h-3zM20 14v7M14 20h4"></path></svg>';
 const ICON_CREDIT = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="5" width="20" height="14" rx="2"></rect><path d="M2 10h20"></path><path d="M6 15h4"></path></svg>';
+const ICON_EXPENSE = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="6" width="20" height="12" rx="2"></rect><circle cx="12" cy="12" r="3"></circle><path d="M6 9v.01M18 15v.01"></path></svg>';
+
+const EXPENSE_CATEGORIES = ['Salaires', 'Facture CIE', 'Facture SODECI', 'Paiement fournisseur', 'Achat marchandise', 'Don personnel', 'Imprévus', 'Autre'];
 
 const CAT_ICONS = {
   sodas: '<svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M10 2h4v3.5c1.3.6 2 1.7 2 3v11.5a2 2 0 0 1-2 2h-4a2 2 0 0 1-2-2V8.5c0-1.3.7-2.4 2-3V2z"></path><path d="M8 12h8"></path><circle cx="14.5" cy="9.5" r="0.4" fill="currentColor" stroke="none"></circle></svg>',
@@ -40,6 +43,7 @@ const NAV_ITEMS = [
   { key: 'fournisseurs', label: 'Fournisseurs', icon: ICON_FOURN, managerOnly: true },
   { key: 'clients', label: 'Clients', icon: ICON_CLIENTS, managerOnly: false },
   { key: 'credits', label: 'Crédits', icon: ICON_CREDIT, managerOnly: false },
+  { key: 'expenses', label: 'Dépenses', icon: ICON_EXPENSE, managerOnly: true },
   { key: 'rapports', label: 'Rapports', icon: ICON_RAPPORTS, managerOnly: true },
   { key: 'employes', label: 'Employés', icon: ICON_EMP, managerOnly: true },
   { key: 'account', label: 'Mon compte', icon: ICON_ACCOUNT, managerOnly: false },
@@ -54,6 +58,7 @@ const TITLES = {
   fournisseurs: ['Fournisseurs', 'Partenaires et approvisionnement'],
   clients: ['Clients', 'Base clients et fidélité'],
   credits: ['Crédits', 'Ventes à crédit et versements'],
+  expenses: ['Dépenses', 'Suivi des sorties de caisse'],
   rapports: ['Rapports', 'Performance commerciale'],
   employes: ['Employés', 'Équipe et accès'],
   account: ['Mon compte', 'Sécurité de votre compte'],
@@ -64,9 +69,9 @@ const state = {
   loggedIn: false, role: null, userId: null, userName: '',
   loginMode: null, loginUsername: '', loginPassword: '', loginError: null,
   screen: 'dashboard',
-  depots: [], categories: [], suppliers: [], clients: [], employees: [], products: [], sales: [],
+  depots: [], categories: [], suppliers: [], clients: [], employees: [], products: [], sales: [], expenses: [],
   currentDepotId: '', // depot the signed-in user is currently operating / selling from
-  stockDepotFilter: '', dashDepotFilter: '', repDepotFilter: '', // 'all' or a depot id
+  stockDepotFilter: '', dashDepotFilter: '', repDepotFilter: '', expenseDepotFilter: '', // 'all' or a depot id
   cart: [], posCategory: 'all', posSearch: '', posClientId: '', paymentMethod: 'Espèces',
   scanInput: '', showScanner: false, scanError: null,
   stockSearch: '', stockCatFilter: 'all', showAddProduct: false,
@@ -80,6 +85,7 @@ const state = {
   showTransfer: false, trProductId: '', trFromDepotId: '', trToDepotId: '', trQty: '',
   showRestock: false, rsProductId: '', rsDepotId: '', rsQty: '',
   creditFilter: 'open', showCreditPayment: false, cpSaleId: '', cpAmount: '',
+  showAddExpense: false, exCategory: EXPENSE_CATEGORIES[0], exCustomCategory: '', exAmount: '', exDepotId: '', exNote: '',
   pwCurrent: '', pwNew: '', pwConfirm: '', pwError: null, pwSuccess: null,
   toast: null,
   showReceipt: false, lastReceipt: null,
@@ -170,8 +176,8 @@ async function submitLogin() {
     state.loginMode = null; state.loginUsername = ''; state.loginPassword = ''; state.loginError = null;
     const depotId = data.depotId || (state.depots[0] && state.depots[0].id) || '';
     state.currentDepotId = depotId;
-    state.stockDepotFilter = depotId; state.dashDepotFilter = depotId; state.repDepotFilter = depotId;
-    state.npDepotId = depotId; state.neDepotId = depotId;
+    state.stockDepotFilter = depotId; state.dashDepotFilter = depotId; state.repDepotFilter = depotId; state.expenseDepotFilter = depotId;
+    state.npDepotId = depotId; state.neDepotId = depotId; state.exDepotId = depotId;
     rerender();
   } catch (e) {
     state.loginError = e.message || 'Connexion impossible';
@@ -373,6 +379,25 @@ async function submitCreditPayment() {
     flashToast(updated.creditRemaining > 0
       ? 'Versement enregistré. Reste à payer : ' + fcfa(updated.creditRemaining)
       : 'Crédit soldé !');
+    rerender();
+  } catch (e) { flashToast(e.message); }
+}
+
+// ---------- Dépenses ----------
+async function addExpense() {
+  const category = state.exCategory === 'Autre' ? state.exCustomCategory.trim() : state.exCategory;
+  if (!category) return;
+  const amount = Number(state.exAmount) || 0;
+  if (amount <= 0) return;
+  if (!state.exDepotId) return;
+  try {
+    const expense = await api('POST', '/api/expenses', {
+      category, amount, depotId: state.exDepotId, note: state.exNote, recordedBy: state.userName,
+    });
+    state.expenses.unshift(expense);
+    state.showAddExpense = false;
+    state.exCategory = EXPENSE_CATEGORIES[0]; state.exCustomCategory = ''; state.exAmount = ''; state.exNote = '';
+    flashToast('Dépense enregistrée : ' + fcfa(amount));
     rerender();
   } catch (e) { flashToast(e.message); }
 }
@@ -595,6 +620,7 @@ function renderScreen() {
     case 'fournisseurs': return renderFournisseurs();
     case 'clients': return renderClients();
     case 'credits': return renderCredits();
+    case 'expenses': return renderExpenses();
     case 'rapports': return renderRapports();
     case 'employes': return renderEmployes();
     case 'account': return renderAccount();
@@ -981,6 +1007,51 @@ function renderCreditPaymentForm() {
   </div>`;
 }
 
+function renderExpenses() {
+  const filterId = state.expenseDepotFilter || 'all';
+  let list = filterId === 'all' ? state.expenses : state.expenses.filter((e) => e.depotId === filterId);
+  const total = list.reduce((a, e) => a + e.amount, 0);
+  list = list.slice().sort((a, b) => new Date(b.date) - new Date(a.date));
+
+  const rows = list.map((e) => `<tr>
+    <td>${esc(dayLabel(e.date))}</td>
+    <td style="font-weight:600">${esc(e.category)}</td>
+    <td>${esc(e.depotName || '—')}</td>
+    <td>${e.note ? esc(e.note) : '<span style="color:var(--muted)">—</span>'}</td>
+    <td>${esc(e.recordedBy) || '—'}</td>
+    <td class="right" style="font-weight:700;color:var(--danger)">${fcfa(e.amount)}</td>
+  </tr>`).join('');
+
+  const catOptions = EXPENSE_CATEGORIES.map((c) => `<option value="${c}"${state.exCategory === c ? ' selected' : ''}>${esc(c)}</option>`).join('');
+  const depotOptions = state.depots.map((d) => `<option value="${d.id}"${state.exDepotId === d.id ? ' selected' : ''}>${esc(d.name)}</option>`).join('');
+  const customCatHtml = state.exCategory === 'Autre'
+    ? `<input id="field-exCustomCategory" class="field" type="text" placeholder="Préciser la catégorie" value="${esc(state.exCustomCategory)}" data-bind="exCustomCategory" />` : '';
+
+  const addFormHtml = state.showAddExpense ? `<div class="add-form cols-4">
+    <select id="field-exCategory" class="field" data-bind="exCategory">${catOptions}</select>
+    ${customCatHtml}
+    <input id="field-exAmount" class="field" type="number" placeholder="Montant (FCFA)" value="${esc(state.exAmount)}" data-bind="exAmount" />
+    <select id="field-exDepotId" class="field" data-bind="exDepotId">${depotOptions}</select>
+    <input id="field-exNote" class="field" type="text" placeholder="Note (optionnel)" value="${esc(state.exNote)}" data-bind="exNote" />
+    <div class="save-btn" data-action="addExpense">Enregistrer</div>
+  </div>` : '';
+
+  return `<div>
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;flex-wrap:wrap;gap:10px">
+      <div class="card" style="padding:14px 18px"><div class="kpi-label">TOTAL DÉPENSES</div><div class="kpi-value" style="color:var(--danger)">${fcfa(total)}</div></div>
+      <div style="display:flex;gap:10px;align-items:center">
+        ${renderDepotFilter('expenseDepotFilter', true)}
+        <div class="add-btn" data-action="toggleAddExpense">+ Ajouter une dépense</div>
+      </div>
+    </div>
+    ${addFormHtml}
+    <div class="table-card"><table class="data-table">
+      <tr><th>DATE</th><th>CATÉGORIE</th><th>DÉPÔT</th><th>NOTE</th><th>ENREGISTRÉ PAR</th><th class="right">MONTANT</th></tr>
+      ${rows || '<tr><td colspan="6" style="text-align:center;color:var(--muted);padding:20px">Aucune dépense enregistrée.</td></tr>'}
+    </table></div>
+  </div>`;
+}
+
 function renderRapports() {
   const filterId = state.repDepotFilter || 'all';
   const relevantSales = salesForDepot(filterId);
@@ -1196,6 +1267,15 @@ const Actions = {
   openCreditPayment: (ds) => { state.showCreditPayment = true; state.cpSaleId = ds.id; state.cpAmount = ''; rerender(); },
   cancelCreditPayment: () => { state.showCreditPayment = false; state.cpSaleId = ''; state.cpAmount = ''; rerender(); },
   doCreditPayment: () => submitCreditPayment(),
+  toggleAddExpense: () => {
+    state.showAddExpense = !state.showAddExpense;
+    if (state.showAddExpense) {
+      state.exCategory = EXPENSE_CATEGORIES[0]; state.exCustomCategory = ''; state.exAmount = ''; state.exNote = '';
+      state.exDepotId = state.expenseDepotFilter !== 'all' ? state.expenseDepotFilter : state.currentDepotId;
+    }
+    rerender();
+  },
+  addExpense: () => addExpense(),
   toggleAddDepot: () => { state.showAddDepot = !state.showAddDepot; rerender(); },
   addDepot: () => addDepot(),
   toggleAddCategory: () => { state.showAddCategory = !state.showAddCategory; rerender(); },
@@ -1237,7 +1317,7 @@ function onInput(e) {
   state[el.dataset.bind] = el.value;
   if (LIVE_BINDS.has(el.dataset.bind)) rerender();
 }
-const DEPOT_VIEW_FILTER_BINDS = new Set(['dashDepotFilter', 'stockDepotFilter', 'repDepotFilter']);
+const DEPOT_VIEW_FILTER_BINDS = new Set(['dashDepotFilter', 'stockDepotFilter', 'repDepotFilter', 'expenseDepotFilter']);
 function onChange(e) {
   const el = e.target;
   if (!el.dataset || !el.dataset.bind || el.tagName !== 'SELECT') return;
@@ -1249,6 +1329,7 @@ function onChange(e) {
     state.stockDepotFilter = el.value;
     state.dashDepotFilter = el.value;
     state.repDepotFilter = el.value;
+    state.expenseDepotFilter = el.value;
   } else if (DEPOT_VIEW_FILTER_BINDS.has(bind) && el.value !== 'all') {
     // Picking a specific depot from any of these view filters (Dashboard,
     // Stocks, Rapports) also becomes the operating depot, so it stays the
@@ -1259,6 +1340,7 @@ function onChange(e) {
     state.stockDepotFilter = el.value;
     state.dashDepotFilter = el.value;
     state.repDepotFilter = el.value;
+    state.expenseDepotFilter = el.value;
   }
   rerender();
 }
@@ -1300,10 +1382,11 @@ async function boot() {
     const data = await api('GET', '/api/state');
     state.depots = data.depots || [];
     state.categories = data.categories; state.suppliers = data.suppliers; state.products = data.products;
-    state.clients = data.clients; state.employees = data.employees; state.sales = data.sales;
+    state.clients = data.clients; state.employees = data.employees; state.sales = data.sales; state.expenses = data.expenses || [];
     state.npCategoryId = data.categories[0] ? data.categories[0].id : '';
     state.npSupplierId = data.suppliers[0] ? data.suppliers[0].id : '';
     state.npDepotId = state.depots[0] ? state.depots[0].id : '';
+    state.exDepotId = state.depots[0] ? state.depots[0].id : '';
   } catch (e) {
     console.error('Impossible de charger les données', e);
   }

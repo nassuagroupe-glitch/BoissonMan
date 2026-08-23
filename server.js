@@ -148,7 +148,27 @@ function buildSeed() {
       items: [],
     };
   });
-  return { depots, categories, suppliers, products, clients, employees, sales };
+  const expensesSeed = [
+    { dayOffset: 5, cashier: 'Ismaël Nassua', category: 'Facture CIE', amount: 45000, note: 'Facture électricité du mois' },
+    { dayOffset: 4, cashier: 'Ismaël Nassua', category: 'Achat marchandise', amount: 320000, note: 'Réassort Brasseries du Faso' },
+    { dayOffset: 2, cashier: 'Ismaël Nassua', category: 'Facture SODECI', amount: 18000, note: '' },
+    { dayOffset: 1, cashier: 'Ismaël Nassua', category: 'Salaires', amount: 150000, note: 'Avance sur salaire — Adama Kéré' },
+    { dayOffset: 0, cashier: 'Ismaël Nassua', category: 'Imprévus', amount: 5000, note: 'Réparation frigo' },
+  ];
+  const expenses = expensesSeed.map((e, i) => {
+    const depotId = empDepot[e.cashier] || 'd1';
+    return {
+      id: 'exp-seed-' + (i + 1),
+      date: daysAgo(e.dayOffset, 10, 0),
+      category: e.category,
+      amount: e.amount,
+      note: e.note,
+      depotId,
+      depotName: depotName[depotId] || '',
+      recordedBy: e.cashier,
+    };
+  });
+  return { depots, categories, suppliers, products, clients, employees, sales, expenses };
 }
 
 // Upgrades a pre-multi-dépôt db.json (flat product.stock, no depots) in
@@ -200,7 +220,9 @@ function loadDB() {
     return seed;
   }
   const data = JSON.parse(fs.readFileSync(DB_PATH, 'utf8'));
-  if (migrateToDepots(data)) fs.writeFileSync(DB_PATH, JSON.stringify(data, null, 2));
+  let changed = migrateToDepots(data);
+  if (!Array.isArray(data.expenses)) { data.expenses = []; changed = true; }
+  if (changed) fs.writeFileSync(DB_PATH, JSON.stringify(data, null, 2));
   return data;
 }
 function saveDB(db) {
@@ -535,6 +557,29 @@ async function handleApi(req, res, pathname) {
     sale.creditRemaining -= amount;
     saveDB(db);
     return sendJSON(res, 200, sale);
+  }
+
+  if (pathname === '/api/expenses' && method === 'POST') {
+    const body = await readJSONBody(req);
+    const category = (body.category || '').trim();
+    if (!category) return sendJSON(res, 400, { error: 'Catégorie requise' });
+    const amount = Number(body.amount) || 0;
+    if (amount <= 0) return sendJSON(res, 400, { error: 'Montant invalide' });
+    const depot = db.depots.find((d) => d.id === body.depotId);
+    if (!depot) return sendJSON(res, 400, { error: 'Dépôt invalide' });
+    const expense = {
+      id: uid('exp'),
+      date: new Date().toISOString(),
+      category,
+      amount,
+      note: (body.note || '').trim(),
+      depotId: depot.id,
+      depotName: depot.name,
+      recordedBy: body.recordedBy || '',
+    };
+    db.expenses.unshift(expense);
+    saveDB(db);
+    return sendJSON(res, 201, expense);
   }
 
   return sendJSON(res, 404, { error: 'Route inconnue' });
