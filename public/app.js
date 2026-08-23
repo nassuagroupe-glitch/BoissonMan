@@ -72,7 +72,7 @@ const state = {
   depots: [], categories: [], suppliers: [], clients: [], employees: [], products: [], sales: [], expenses: [],
   currentDepotId: '', // depot the signed-in user is currently operating / selling from
   stockDepotFilter: '', dashDepotFilter: '', repDepotFilter: '', expenseDepotFilter: '', // 'all' or a depot id
-  cart: [], posCategory: 'all', posSearch: '', posClientId: '', paymentMethod: 'Espèces',
+  cart: [], posCategory: 'all', posSearch: '', posClientId: '', paymentMethod: 'Espèces', posAdvance: '',
   scanInput: '', showScanner: false, scanError: null,
   stockSearch: '', stockCatFilter: 'all', showAddProduct: false,
   npName: '', npCategoryId: '', npSupplierId: '', npDepotId: '', npPrice: '', npCost: '', npStock: '', npMinStock: '',
@@ -243,6 +243,7 @@ async function checkout() {
   try {
     const data = await api('POST', '/api/checkout', {
       cart: state.cart, clientId: state.posClientId, paymentMethod: state.paymentMethod, cashier: state.userName, depotId: state.currentDepotId,
+      advance: state.paymentMethod === 'Crédit' ? (Number(state.posAdvance) || 0) : undefined,
     });
     const sale = data.sale;
     sale.items.forEach((it) => {
@@ -254,7 +255,7 @@ async function checkout() {
       if (c) { c.points += Math.floor(sale.total / 100); c.totalSpent += sale.total; }
     }
     state.sales.unshift(sale);
-    state.cart = []; state.posClientId = '';
+    state.cart = []; state.posClientId = ''; state.posAdvance = '';
     state.lastReceipt = sale; state.showReceipt = true;
     rerender();
   } catch (e) {
@@ -747,6 +748,7 @@ function renderCaisse() {
           <div class="pay-tab${state.paymentMethod === 'Crédit' ? ' active' : ''}" data-action="setPayCredit">Crédit</div>
         </div>
         ${state.paymentMethod === 'Crédit' && !state.posClientId ? `<div class="pos-error">Sélectionnez un client pour une vente à crédit.</div>` : ''}
+        ${state.paymentMethod === 'Crédit' ? `<input id="field-posAdvance" class="field" type="number" placeholder="Avance versée maintenant (optionnel)" value="${esc(state.posAdvance)}" data-bind="posAdvance" />` : ''}
         <div class="cart-total-row"><span>Total</span><span class="cart-total-value">${fcfa(cartTotal)}</span></div>
         <div class="checkout-btn" style="${state.cart.length && !(state.paymentMethod === 'Crédit' && !state.posClientId) ? '' : 'opacity:0.5;cursor:not-allowed'}" data-action="checkout">Encaisser</div>
       </div>
@@ -1060,6 +1062,16 @@ function renderRapports() {
   const avgBasket = salesCount ? totalRevenue / salesCount : 0;
   const unitsSold = relevantSales.reduce((a, sa) => a + sa.itemCount, 0);
 
+  const relevantExpenses = filterId === 'all' ? state.expenses : state.expenses.filter((e) => e.depotId === filterId);
+  const totalExpenses = relevantExpenses.reduce((a, e) => a + e.amount, 0);
+  const creditOutstanding = relevantSales.filter((sa) => sa.paymentMethod === 'Crédit').reduce((a, sa) => a + (sa.creditRemaining || 0), 0);
+  // Cash actually collected: non-credit sales count in full (assumed paid on
+  // the spot); credit sales only count creditPaid — the advance taken at
+  // sale time plus any later tranche payments — never the uncollected
+  // remainder. Dépenses are then subtracted to get the real cash position.
+  const cashCollected = relevantSales.reduce((a, sa) => a + (sa.paymentMethod === 'Crédit' ? (sa.creditPaid || 0) : sa.total), 0);
+  const soldeCaisse = cashCollected - totalExpenses;
+
   // Revenue-by-category and top-products are derived from the itemised
   // history of real checkouts (sale.items) rather than the lifetime
   // product.sold counter, so they can be filtered by depot correctly —
@@ -1091,7 +1103,12 @@ function renderRapports() {
       <div class="card"><div class="kpi-label">PANIER MOYEN</div><div class="kpi-value" style="font-size:24px">${fcfa(avgBasket)}</div></div>
       <div class="card"><div class="kpi-label">UNITÉS VENDUES</div><div class="kpi-value" style="font-size:24px">${unitsSold}</div></div>
     </div>
-    <div style="font-size:11.5px;color:var(--muted);margin-bottom:14px">Le revenu par catégorie et le classement produits ci-dessous couvrent l'historique complet de toutes les boutiques.</div>
+    <div class="kpi-grid" style="grid-template-columns:repeat(3,1fr);margin-bottom:6px">
+      <div class="card"><div class="kpi-label">SOLDE DE CAISSE</div><div class="kpi-value" style="font-size:24px;color:${soldeCaisse >= 0 ? 'var(--green)' : 'var(--danger)'}">${fcfa(soldeCaisse)}</div></div>
+      <div class="card"><div class="kpi-label">DÉPENSES</div><div class="kpi-value" style="font-size:24px;color:var(--danger)">${fcfa(totalExpenses)}</div></div>
+      <div class="card"><div class="kpi-label">CRÉDIT EN COURS</div><div class="kpi-value" style="font-size:24px;color:var(--danger)">${fcfa(creditOutstanding)}</div></div>
+    </div>
+    <div style="font-size:11.5px;color:var(--muted);margin-bottom:14px">Le solde de caisse compte les ventes payées immédiatement en totalité, et les ventes à crédit seulement pour l'avance et les versements déjà reçus (pas le solde restant) — moins les dépenses. Le revenu par catégorie et le classement produits ci-dessous couvrent l'historique complet de toutes les boutiques.</div>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
       <div class="card"><div class="card-title">Revenu par catégorie</div><div style="display:flex;flex-direction:column;gap:12px">${catRows}</div></div>
       <div class="card"><div class="card-title">Top 5 produits</div><div style="display:flex;flex-direction:column;gap:10px">${topProducts || '<div style="font-size:13px;color:var(--muted)">Aucune vente enregistrée pour le moment.</div>'}</div></div>
@@ -1207,6 +1224,7 @@ function renderReceiptModal() {
           <div class="receipt-items">${itemsHtml}</div>
           <div class="receipt-total"><span>Total</span><span>${fcfa(r.total)}</span></div>
           <div class="receipt-pay"><span>Paiement</span><span>${esc(r.paymentMethod)}</span></div>
+          ${r.paymentMethod === 'Crédit' && r.creditPaid > 0 ? `<div class="receipt-pay"><span>Avance versée</span><span>${fcfa(r.creditPaid)}</span></div>` : ''}
           ${r.paymentMethod === 'Crédit' ? `<div class="receipt-pay"><span>Solde restant</span><span>${fcfa(r.creditRemaining)}</span></div>` : ''}
           <div class="receipt-thanks">Merci de votre achat !</div>
         </div>
@@ -1237,9 +1255,9 @@ const Actions = {
   cartMinus: (ds) => changeCartQty(ds.id, -1),
   cartPlus: (ds) => changeCartQty(ds.id, 1),
   cartRemove: (ds) => removeFromCart(ds.id),
-  setPayCash: () => { state.paymentMethod = 'Espèces'; rerender(); },
-  setPayMobile: () => { state.paymentMethod = 'Mobile Money'; rerender(); },
-  setPayCard: () => { state.paymentMethod = 'Carte'; rerender(); },
+  setPayCash: () => { state.paymentMethod = 'Espèces'; state.posAdvance = ''; rerender(); },
+  setPayMobile: () => { state.paymentMethod = 'Mobile Money'; state.posAdvance = ''; rerender(); },
+  setPayCard: () => { state.paymentMethod = 'Carte'; state.posAdvance = ''; rerender(); },
   setPayCredit: () => { state.paymentMethod = 'Crédit'; rerender(); },
   checkout: () => checkout(),
   openScanner: () => { state.showScanner = true; state.scanError = null; rerender(); },

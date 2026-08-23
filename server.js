@@ -490,12 +490,20 @@ async function handleApi(req, res, pathname) {
     }
 
     // Validate stock availability before committing anything.
+    let precomputedTotal = 0;
     for (const ci of cart) {
       const product = db.products.find((p) => p.id === ci.productId);
       if (!product) return sendJSON(res, 400, { error: 'Produit introuvable : ' + ci.productId });
       if (ci.qty <= 0 || ci.qty > stockAt(product, depot.id)) {
         return sendJSON(res, 409, { error: 'Stock insuffisant pour ' + product.name + ' au ' + depot.name });
       }
+      precomputedTotal += product.price * ci.qty;
+    }
+    let advance = 0;
+    if (paymentMethod === 'Crédit') {
+      advance = Number(body.advance) || 0;
+      if (advance < 0) return sendJSON(res, 400, { error: 'Avance invalide' });
+      if (advance > precomputedTotal) return sendJSON(res, 400, { error: "L'avance ne peut pas dépasser le total de la vente" });
     }
 
     let total = 0;
@@ -532,9 +540,9 @@ async function handleApi(req, res, pathname) {
       items,
     };
     if (paymentMethod === 'Crédit') {
-      sale.creditPaid = 0;
-      sale.creditRemaining = total;
-      sale.creditPayments = [];
+      sale.creditPaid = advance;
+      sale.creditRemaining = total - advance;
+      sale.creditPayments = advance > 0 ? [{ id: uid('pay'), date: sale.date, amount: advance }] : [];
     }
     db.sales.unshift(sale);
     saveDB(db);
