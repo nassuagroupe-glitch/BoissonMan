@@ -310,12 +310,23 @@ function handleDetectedCode(code) {
   }
   lookupAndAddByBarcode(code);
 }
+function buildScanDeviceSelectHtml() {
+  const deviceOptions = state.scanDevices.map((d, i) => `<option value="${esc(d.deviceId)}"${state.scanDeviceId === d.deviceId ? ' selected' : ''}>${esc(d.label || 'Caméra ' + (i + 1))}</option>`).join('');
+  return state.scanDevices.length > 1
+    ? `<select id="field-scanDeviceId" class="field" style="margin-top:10px" data-bind="scanDeviceId">${deviceOptions}</select>
+       <div class="pos-hint" style="text-align:center;margin-top:4px">Un téléphone utilisé comme webcam (via une appli comme DroidCam/Iriun) apparaît ici — sélectionnez-le pour scanner avec.</div>`
+    : '';
+}
 async function refreshScanDevices() {
   if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) return;
   try {
     const devices = await navigator.mediaDevices.enumerateDevices();
     state.scanDevices = devices.filter((d) => d.kind === 'videoinput');
-    rerender();
+    // Patch just the device picker in place rather than calling rerender():
+    // a full rerender replaces the <video> element too, which would tear
+    // down the camera stream we just finished attaching.
+    const wrap = document.getElementById('scanner-device-select-wrap');
+    if (wrap) wrap.innerHTML = buildScanDeviceSelectHtml();
   } catch (e) {}
 }
 function startCamera() {
@@ -1302,11 +1313,6 @@ function renderAccount() {
 function renderScannerModal() {
   if (!state.showScanner) return '';
   const errorHtml = state.scanError ? `<div class="pos-error" style="text-align:center;margin-top:8px">${esc(state.scanError)}</div>` : '';
-  const deviceOptions = state.scanDevices.map((d, i) => `<option value="${esc(d.deviceId)}"${state.scanDeviceId === d.deviceId ? ' selected' : ''}>${esc(d.label || 'Caméra ' + (i + 1))}</option>`).join('');
-  const deviceSelectHtml = state.scanDevices.length > 1
-    ? `<select id="field-scanDeviceId" class="field" style="margin-top:10px" data-bind="scanDeviceId">${deviceOptions}</select>
-       <div class="pos-hint" style="text-align:center;margin-top:4px">Un téléphone utilisé comme webcam (via une appli comme DroidCam/Iriun) apparaît ici — sélectionnez-le pour scanner avec.</div>`
-    : '';
   const title = state.scanMode === 'register' ? 'Scanner le code-barres du produit' : 'Scanner un produit';
   return `<div class="modal-overlay">
     <div class="modal-card scanner-modal">
@@ -1314,7 +1320,7 @@ function renderScannerModal() {
       <div class="modal-body">
         <div class="scanner-frame"><video id="scanner-video" autoplay muted playsinline></video><div class="scanner-reticle"></div></div>
         <div class="scanner-hint">Placez le code-barres ou QR code du produit devant la caméra.</div>
-        ${deviceSelectHtml}
+        <div id="scanner-device-select-wrap">${buildScanDeviceSelectHtml()}</div>
         ${errorHtml}
       </div>
       <div class="modal-footer"><div class="modal-footer-btn secondary" style="flex:1" data-action="closeScanner">Fermer</div></div>
