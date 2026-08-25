@@ -445,6 +445,10 @@ async function handleApi(req, res, pathname) {
     const body = await readJSONBody(req);
     const name = (body.name || '').trim();
     if (!name) return sendJSON(res, 400, { error: 'Nom requis' });
+    const scannedBarcode = (body.barcode || '').trim();
+    if (scannedBarcode && db.products.some((p) => p.barcode === scannedBarcode)) {
+      return sendJSON(res, 400, { error: 'Ce code-barres est déjà utilisé par un autre produit' });
+    }
     const initialDepotId = body.depotId || (db.depots[0] && db.depots[0].id) || '';
     const stockByDepot = {};
     db.depots.forEach((d) => { stockByDepot[d.id] = d.id === initialDepotId ? (Number(body.stock) || 0) : 0; });
@@ -457,7 +461,7 @@ async function handleApi(req, res, pathname) {
       stockByDepot,
       minStock: Number(body.minStock) || 10,
       sold: 0,
-      barcode: uid('bc').slice(0, 13),
+      barcode: scannedBarcode || uid('bc').slice(0, 13),
       unitsPerPack: Number(body.unitsPerPack) || 0,
       pricePerPack: Number(body.pricePerPack) || 0,
       unitsPerCarton: Number(body.unitsPerCarton) || 0,
@@ -477,6 +481,13 @@ async function handleApi(req, res, pathname) {
       const name = body.name.trim();
       if (!name) return sendJSON(res, 400, { error: 'Nom requis' });
       product.name = name;
+    }
+    if (body.barcode !== undefined) {
+      const barcode = body.barcode.trim();
+      if (barcode && db.products.some((p) => p.barcode === barcode && p.id !== product.id)) {
+        return sendJSON(res, 400, { error: 'Ce code-barres est déjà utilisé par un autre produit' });
+      }
+      if (barcode) product.barcode = barcode;
     }
     if (body.categoryId !== undefined) product.categoryId = body.categoryId;
     if (body.supplierId !== undefined) product.supplierId = body.supplierId;

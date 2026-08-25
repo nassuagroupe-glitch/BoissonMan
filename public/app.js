@@ -80,7 +80,7 @@ const state = {
   cart: [], posCategory: 'all', posSearch: '', posClientId: '', paymentMethod: 'Espèces', posAdvance: '',
   scanInput: '', showScanner: false, scanError: null,
   stockSearch: '', stockCatFilter: 'all', showAddProduct: false,
-  npName: '', npCategoryId: '', npSupplierId: '', npDepotId: '', npPrice: '', npCost: '', npStock: '', npMinStock: '',
+  npName: '', npBarcode: '', npCategoryId: '', npSupplierId: '', npDepotId: '', npPrice: '', npCost: '', npStock: '', npMinStock: '',
   npUnitsPerPack: '', npPricePerPack: '', npUnitsPerCarton: '', npPricePerCarton: '', editingProductId: null,
   showAddCategory: false, ncName: '',
   showAddSupplier: false, nsName: '', nsPhone: '', nsEmail: '',
@@ -338,7 +338,7 @@ function adjustStock(productId, delta, depotId) {
 }
 function resetProductForm() {
   state.showAddProduct = false; state.editingProductId = null;
-  state.npName = ''; state.npPrice = ''; state.npCost = ''; state.npStock = ''; state.npMinStock = '';
+  state.npName = ''; state.npBarcode = ''; state.npPrice = ''; state.npCost = ''; state.npStock = ''; state.npMinStock = '';
   state.npUnitsPerPack = ''; state.npPricePerPack = ''; state.npUnitsPerCarton = ''; state.npPricePerCarton = '';
 }
 function openAddProductForm() {
@@ -353,7 +353,7 @@ function openEditProductForm(id) {
   if (!p) return;
   resetProductForm();
   state.editingProductId = id;
-  state.npName = p.name; state.npCategoryId = p.categoryId; state.npSupplierId = p.supplierId;
+  state.npName = p.name; state.npBarcode = p.barcode || ''; state.npCategoryId = p.categoryId; state.npSupplierId = p.supplierId;
   state.npPrice = p.price; state.npCost = p.cost; state.npMinStock = p.minStock;
   state.npUnitsPerPack = p.unitsPerPack || ''; state.npPricePerPack = p.pricePerPack || '';
   state.npUnitsPerCarton = p.unitsPerCarton || ''; state.npPricePerCarton = p.pricePerCarton || '';
@@ -366,7 +366,7 @@ async function addProduct() {
   if (!state.npName.trim()) return;
   try {
     const product = await api('POST', '/api/products', {
-      name: state.npName.trim(), categoryId: state.npCategoryId, supplierId: state.npSupplierId, depotId: state.npDepotId,
+      name: state.npName.trim(), barcode: state.npBarcode.trim(), categoryId: state.npCategoryId, supplierId: state.npSupplierId, depotId: state.npDepotId,
       price: Number(state.npPrice) || 0, cost: Number(state.npCost) || 0, stock: Number(state.npStock) || 0, minStock: Number(state.npMinStock) || 10,
       unitsPerPack: Number(state.npUnitsPerPack) || 0, pricePerPack: Number(state.npPricePerPack) || 0,
       unitsPerCarton: Number(state.npUnitsPerCarton) || 0, pricePerCarton: Number(state.npPricePerCarton) || 0,
@@ -381,7 +381,7 @@ async function updateProduct() {
   if (!state.npName.trim()) return;
   try {
     const updated = await api('PATCH', `/api/products/${state.editingProductId}`, {
-      name: state.npName.trim(), categoryId: state.npCategoryId, supplierId: state.npSupplierId,
+      name: state.npName.trim(), barcode: state.npBarcode.trim(), categoryId: state.npCategoryId, supplierId: state.npSupplierId,
       price: Number(state.npPrice) || 0, cost: Number(state.npCost) || 0, minStock: Number(state.npMinStock) || 10,
       unitsPerPack: Number(state.npUnitsPerPack) || 0, pricePerPack: Number(state.npPricePerPack) || 0,
       unitsPerCarton: Number(state.npUnitsPerCarton) || 0, pricePerCarton: Number(state.npPricePerCarton) || 0,
@@ -866,6 +866,8 @@ function renderStocks() {
   const isEditingProduct = !!state.editingProductId;
   const addFormHtml = state.showAddProduct ? `<div class="add-form cols-4">
     <input id="field-npName" class="field" type="text" placeholder="Nom du produit" value="${esc(state.npName)}" data-bind="npName" />
+    <input id="field-npBarcode" class="field" type="text" placeholder="Code-barres (scanner USB ou saisir)" autofocus value="${esc(state.npBarcode)}" data-bind="npBarcode" />
+    <div class="pos-hint" style="grid-column:1/-1;margin:0">Astuce : cliquez dans le champ code-barres puis scannez le produit avec un lecteur USB — le code s'y saisit tout seul. Laissez vide pour générer un code interne automatiquement.</div>
     <select id="field-npCategoryId" class="field" data-bind="npCategoryId">${npCatOptions}</select>
     <select id="field-npSupplierId" class="field" data-bind="npSupplierId">${npSupOptions}</select>
     ${isEditingProduct ? '' : `<select id="field-npDepotId" class="field" data-bind="npDepotId" title="Dépôt de réception du stock initial">${npDepotOptions}</select>`}
