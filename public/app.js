@@ -83,6 +83,7 @@ const state = {
   stockSearch: '', stockCatFilter: 'all', showAddProduct: false,
   npName: '', npBarcode: '', npCategoryId: '', npSupplierId: '', npDepotId: '', npPrice: '', npCost: '', npStock: '', npMinStock: '',
   npUnitsPerPack: '', npPricePerPack: '', npUnitsPerCarton: '', npPricePerCarton: '', editingProductId: null,
+  confirmDeleteProductId: null,
   showAddCategory: false, ncName: '',
   showAddSupplier: false, nsName: '', nsPhone: '', nsEmail: '',
   showAddClient: false, ncliName: '', ncliPhone: '',
@@ -495,6 +496,19 @@ async function updateProduct() {
     flashToast('Produit mis à jour : ' + updated.name);
     rerender();
   } catch (e) { flashToast(e.message); }
+}
+async function deleteProduct(id) {
+  try {
+    await api('DELETE', `/api/products/${id}`);
+    state.products = state.products.filter((p) => p.id !== id);
+    state.confirmDeleteProductId = null;
+    flashToast('Produit supprimé');
+    rerender();
+  } catch (e) {
+    state.confirmDeleteProductId = null;
+    flashToast(e.message);
+    rerender();
+  }
 }
 async function stockTransfer() {
   if (!state.trProductId || !state.trFromDepotId || !state.trToDepotId) return;
@@ -956,8 +970,11 @@ function renderStocks() {
         </div>`;
     const packagingHint = (p.unitsPerPack > 1 || p.unitsPerCarton > 1)
       ? `<div style="font-size:10.5px;color:var(--muted)">${p.unitsPerPack > 1 ? `paquet ${p.unitsPerPack}` : ''}${p.unitsPerPack > 1 && p.unitsPerCarton > 1 ? ' · ' : ''}${p.unitsPerCarton > 1 ? `carton ${p.unitsPerCarton}` : ''}</div>` : '';
+    const nameActionsHtml = state.confirmDeleteProductId === p.id
+      ? ` <span style="font-size:11px;color:var(--danger);font-weight:600">Supprimer ?</span> <span style="cursor:pointer;color:var(--danger);vertical-align:middle" data-action="confirmDeleteProduct" data-id="${p.id}" title="Confirmer">${ICON_CHECK}</span> <span style="cursor:pointer;color:var(--muted);vertical-align:middle" data-action="cancelDeleteProduct" title="Annuler">${ICON_CLOSE}</span>`
+      : ` <span style="cursor:pointer;color:var(--muted);vertical-align:middle" data-action="editProduct" data-id="${p.id}" title="Modifier">${ICON_EDIT}</span>${state.role === 'manager' ? ` <span style="cursor:pointer;color:var(--danger);vertical-align:middle" data-action="askDeleteProduct" data-id="${p.id}" title="Supprimer">${ICON_TRASH}</span>` : ''}`;
     return `<tr>
-      <td style="font-weight:600">${esc(p.name)} <span style="cursor:pointer;color:var(--muted);vertical-align:middle" data-action="editProduct" data-id="${p.id}" title="Modifier">${ICON_EDIT}</span>${packagingHint}</td>
+      <td style="font-weight:600">${esc(p.name)}${nameActionsHtml}${packagingHint}</td>
       <td><span class="dot" style="background:${cat ? cat.color : '#888'}"></span>${cat ? esc(cat.name) : '—'}</td>
       <td class="right">${fcfa(p.price)}</td>
       <td class="center" style="font-weight:700">${qty}</td>
@@ -1475,7 +1492,7 @@ const Actions = {
   backToRoleSelect: () => { state.loginMode = null; state.loginUsername = ''; state.loginPassword = ''; state.loginError = null; rerender(); },
   submitLogin: () => submitLogin(),
   logout: () => logout(),
-  nav: (ds) => { state.screen = ds.screen; state.pwError = null; state.pwSuccess = null; state.confirmDeleteEmployeeId = null; rerender(); },
+  nav: (ds) => { state.screen = ds.screen; state.pwError = null; state.pwSuccess = null; state.confirmDeleteEmployeeId = null; state.confirmDeleteProductId = null; rerender(); },
   openExternal: (ds) => { window.open(ds.url, '_blank', 'noopener'); },
   setPosCatAll: () => { state.posCategory = 'all'; rerender(); },
   setPosCategory: (ds) => { state.posCategory = ds.id; rerender(); },
@@ -1494,6 +1511,9 @@ const Actions = {
   closeScanner: () => { state.showScanner = false; state.scanError = null; rerender(); },
   toggleAddProduct: () => { if (state.showAddProduct) resetProductForm(); else openAddProductForm(); rerender(); },
   editProduct: (ds) => { openEditProductForm(ds.id); rerender(); },
+  askDeleteProduct: (ds) => { state.confirmDeleteProductId = ds.id; rerender(); },
+  cancelDeleteProduct: () => { state.confirmDeleteProductId = null; rerender(); },
+  confirmDeleteProduct: (ds) => deleteProduct(ds.id),
   saveProduct: () => saveProduct(),
   stockDec: (ds) => adjustStock(ds.id, -1, state.stockDepotFilter),
   stockInc: (ds) => adjustStock(ds.id, 1, state.stockDepotFilter),

@@ -500,6 +500,7 @@ async function handleApi(req, res, pathname) {
     pathname === '/api/stock-transfer' && method === 'POST',
     pathname === '/api/expenses' && method === 'POST',
     /^\/api\/employees\/[^/]+(\/toggle)?$/.test(pathname) && method !== 'GET',
+    /^\/api\/products\/[^/]+$/.test(pathname) && method === 'DELETE',
   ].some(Boolean);
   if (MANAGER_ONLY && !isManager) {
     return sendJSON(res, 403, { error: 'Action réservée au Gérant' });
@@ -702,6 +703,17 @@ async function handleApi(req, res, pathname) {
     if (body.pricePerCarton !== undefined) product.pricePerCarton = Number(body.pricePerCarton) || 0;
     saveTenant(session.tenantId);
     return sendJSON(res, 200, product);
+  }
+
+  if (productUpdateMatch && method === 'DELETE') {
+    const product = db.products.find((p) => p.id === productUpdateMatch[1]);
+    if (!product) return sendJSON(res, 404, { error: 'Produit introuvable' });
+    // Safe to remove even with sale history: checkout snapshots name/price/
+    // qty into sale.items at sale time (see POST /api/checkout), so past
+    // sales never look the product up live and don't break on deletion.
+    db.products = db.products.filter((p) => p.id !== product.id);
+    saveTenant(session.tenantId);
+    return sendJSON(res, 200, { ok: true });
   }
 
   const stockMatch = pathname.match(/^\/api\/products\/([^/]+)\/stock$/);
