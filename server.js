@@ -380,7 +380,6 @@ async function handleApi(req, res, pathname) {
     pathname === '/api/stock-transfer' && method === 'POST',
     pathname === '/api/expenses' && method === 'POST',
     /^\/api\/employees\/[^/]+(\/toggle)?$/.test(pathname) && method !== 'GET',
-    pathname === '/api/admin/restore' && method === 'POST',
   ].some(Boolean);
   if (MANAGER_ONLY && !isManager) {
     return sendJSON(res, 403, { error: 'Action réservée au Gérant' });
@@ -389,39 +388,6 @@ async function handleApi(req, res, pathname) {
   if (pathname === '/api/logout' && method === 'POST') {
     sessions.delete(session.token);
     return sendJSON(res, 200, { ok: true });
-  }
-
-  // TEMPORARY — diagnosing why the Railway volume didn't retain data across
-  // a redeploy. Manager-gated, read-only, no secrets exposed.
-  if (pathname === '/api/admin/diag' && method === 'GET') {
-    if (!isManager) return sendJSON(res, 403, { error: 'Action réservée au Gérant' });
-    let dirList = null, dirErr = null;
-    try { dirList = fs.readdirSync(DATA_DIR); } catch (e) { dirErr = e.message; }
-    let dbStat = null, dbStatErr = null;
-    try { dbStat = fs.statSync(DB_PATH); dbStat = { size: dbStat.size, mtime: dbStat.mtime }; } catch (e) { dbStatErr = e.message; }
-    return sendJSON(res, 200, {
-      DATA_DIR_env: process.env.DATA_DIR || null,
-      DATA_DIR_resolved: DATA_DIR,
-      DB_PATH,
-      dirList, dirErr,
-      dbStat, dbStatErr,
-      pid: process.pid,
-      uptimeSec: process.uptime(),
-    });
-  }
-
-  // TEMPORARY — re-added to redo + verify the data migration after the
-  // first attempt didn't survive a redeploy. Remove once persistence is
-  // confirmed stable across a redeploy.
-  if (pathname === '/api/admin/restore' && method === 'POST') {
-    const body = await readJSONBody(req);
-    const required = ['depots', 'categories', 'suppliers', 'products', 'clients', 'employees', 'sales'];
-    if (!required.every((k) => Array.isArray(body[k]))) {
-      return sendJSON(res, 400, { error: 'Format de sauvegarde invalide' });
-    }
-    db = Object.assign({}, body, { expenses: Array.isArray(body.expenses) ? body.expenses : [] });
-    saveDB(db);
-    return sendJSON(res, 200, { ok: true, counts: { depots: db.depots.length, products: db.products.length, employees: db.employees.length, sales: db.sales.length } });
   }
 
   if (pathname === '/api/state' && method === 'GET') {
