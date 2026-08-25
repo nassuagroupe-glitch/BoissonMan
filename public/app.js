@@ -283,12 +283,31 @@ async function checkout() {
 }
 
 // ---------- Barcode scanning ----------
+let audioCtx = null;
+function playBeep() {
+  try {
+    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.type = 'sine';
+    osc.frequency.value = 1800;
+    gain.gain.setValueAtTime(0.0001, audioCtx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.3, audioCtx.currentTime + 0.01);
+    gain.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + 0.12);
+    osc.connect(gain);
+    gain.connect(audioCtx.destination);
+    osc.start();
+    osc.stop(audioCtx.currentTime + 0.13);
+  } catch (e) {}
+}
 function lookupAndAddByBarcode(code) {
   const product = state.products.find((p) => p.barcode === code.trim());
   if (!product) { state.scanError = 'Code inconnu : ' + code; rerender(); return; }
   if (stockAt(product, state.currentDepotId) <= 0) { state.scanError = product.name + ' — rupture de stock au ' + depotName(state.currentDepotId); rerender(); return; }
   addToCart(product.id);
   state.scanError = null;
+  playBeep();
   flashToast(product.name + ' ajouté au panier');
 }
 function submitScan() {
@@ -308,6 +327,7 @@ function handleDetectedCode(code) {
     state.npBarcode = code;
     state.showScanner = false;
     state.scanError = null;
+    playBeep();
     flashToast('Code-barres capturé : ' + code);
     return;
   }
