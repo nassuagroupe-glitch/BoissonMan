@@ -154,11 +154,20 @@ function salesForDepot(filterId) {
 }
 
 // ---------- API ----------
+// Kept only in memory (never localStorage) — matches the app's existing
+// no-persisted-login behavior, a fresh page load always requires re-login.
+let authToken = null;
 async function api(method, url, body) {
   const opts = { method, headers: {} };
+  if (authToken) opts.headers['Authorization'] = 'Bearer ' + authToken;
   if (body !== undefined) { opts.headers['Content-Type'] = 'application/json'; opts.body = JSON.stringify(body); }
   const res = await fetch(url, opts);
   const data = await res.json().catch(() => ({}));
+  if (res.status === 401 && url !== '/api/login' && state.loggedIn) {
+    logout();
+    state.loginError = 'Session expirée. Veuillez vous reconnecter.';
+    rerender();
+  }
   if (!res.ok) throw new Error(data.error || 'Erreur serveur');
   return data;
 }
@@ -173,12 +182,34 @@ function flashToast(msg) {
 }
 
 // ---------- Auth ----------
+// Loads the full app dataset — only callable once a session token is set,
+// /api/state now 401s for anonymous requests. Called right after login
+// (not at boot) since there's nothing to fetch before the user is
+// authenticated.
+async function loadAppState() {
+  try {
+    const data = await api('GET', '/api/state');
+    state.depots = data.depots || [];
+    state.categories = data.categories; state.suppliers = data.suppliers; state.products = data.products;
+    state.clients = data.clients; state.employees = data.employees; state.sales = data.sales; state.expenses = data.expenses || [];
+    state.npCategoryId = data.categories[0] ? data.categories[0].id : '';
+    state.npSupplierId = data.suppliers[0] ? data.suppliers[0].id : '';
+    state.npDepotId = state.depots[0] ? state.depots[0].id : '';
+    state.exDepotId = state.depots[0] ? state.depots[0].id : '';
+    return true;
+  } catch (e) {
+    console.error('Impossible de charger les données', e);
+    return false;
+  }
+}
 async function submitLogin() {
   const username = state.loginUsername.trim();
   const password = state.loginPassword;
   if (!username || !password) { state.loginError = 'Identifiant et mot de passe requis'; rerender(); return; }
   try {
     const data = await api('POST', '/api/login', { username, password, expectedRole: state.loginMode });
+    authToken = data.token;
+    await loadAppState();
     state.loggedIn = true; state.role = data.role; state.userId = data.userId; state.userName = data.userName; state.screen = 'dashboard';
     state.loginMode = null; state.loginUsername = ''; state.loginPassword = ''; state.loginError = null;
     const depotId = data.depotId || (state.depots[0] && state.depots[0].id) || '';
@@ -187,13 +218,20 @@ async function submitLogin() {
     state.npDepotId = depotId; state.neDepotId = depotId; state.exDepotId = depotId;
     rerender();
   } catch (e) {
+    authToken = null;
     state.loginError = e.message || 'Connexion impossible';
     rerender();
   }
 }
 function logout() {
+  if (authToken) api('POST', '/api/logout').catch(() => {});
+  authToken = null;
   state.loggedIn = false; state.role = null; state.userName = ''; state.userId = null; state.screen = 'dashboard'; state.cart = [];
   state.loginMode = null; state.loginUsername = ''; state.loginPassword = ''; state.loginError = null;
+  // Drop any data fetched under the previous session so a slow-to-close tab
+  // never shows one user's data after another logs in on the same browser.
+  state.depots = []; state.categories = []; state.suppliers = []; state.products = [];
+  state.clients = []; state.employees = []; state.sales = []; state.expenses = [];
   rerender();
 }
 async function changePassword() {
@@ -1598,18 +1636,9 @@ async function boot() {
   app.addEventListener('input', onInput);
   app.addEventListener('change', onChange);
   app.addEventListener('keydown', onKeyDown);
-  try {
-    const data = await api('GET', '/api/state');
-    state.depots = data.depots || [];
-    state.categories = data.categories; state.suppliers = data.suppliers; state.products = data.products;
-    state.clients = data.clients; state.employees = data.employees; state.sales = data.sales; state.expenses = data.expenses || [];
-    state.npCategoryId = data.categories[0] ? data.categories[0].id : '';
-    state.npSupplierId = data.suppliers[0] ? data.suppliers[0].id : '';
-    state.npDepotId = state.depots[0] ? state.depots[0].id : '';
-    state.exDepotId = state.depots[0] ? state.depots[0].id : '';
-  } catch (e) {
-    console.error('Impossible de charger les données', e);
-  }
+  // No data fetch here: /api/state requires a session now, and there's
+  // nothing to show before login anyway. loadAppState() runs after
+  // submitLogin() succeeds instead.
   rerender();
 }
 boot();

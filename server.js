@@ -7,8 +7,8 @@ const crypto = require('crypto');
 
 const DEFAULT_PASSWORD = '1234'; // seeded/legacy accounts only — set at creation for new employees
 
-const PORT = 8791;
-const HOST = '127.0.0.1';
+const PORT = Number(process.env.PORT) || 8791;
+const HOST = process.env.HOST || '127.0.0.1';
 const PUBLIC_DIR = path.join(__dirname, 'public');
 const DB_PATH = path.join(__dirname, 'data', 'db.json');
 
@@ -296,15 +296,38 @@ function publicState() {
   return Object.assign({}, db, { employees: db.employees.map(publicEmployee) });
 }
 
+// ---------- Sessions ----------
+// In-memory only (no DB table): sessions are lost on server restart, which
+// just forces everyone to log in again — acceptable since the client never
+// persisted login across a page reload anyway (see app.js: authToken lives
+// in a JS variable, never localStorage).
+const sessions = new Map(); // token -> { employeeId, role, createdAt }
+const SESSION_TTL_MS = 12 * 60 * 60 * 1000; // 12h
+function createSession(employee) {
+  const token = crypto.randomBytes(32).toString('hex');
+  sessions.set(token, {
+    employeeId: employee.id,
+    role: employee.role === 'Gérant' ? 'manager' : 'cashier',
+    createdAt: Date.now(),
+  });
+  return token;
+}
+function getSession(req) {
+  const header = req.headers['authorization'] || '';
+  const match = header.match(/^Bearer (.+)$/);
+  if (!match) return null;
+  const token = match[1];
+  const session = sessions.get(token);
+  if (!session) return null;
+  if (Date.now() - session.createdAt > SESSION_TTL_MS) { sessions.delete(token); return null; }
+  return { token, employeeId: session.employeeId, role: session.role };
+}
+
 const CAT_PALETTE = ['#c1440e', '#b8862f', '#2f7f9e', '#d9812f', '#7d3b56', '#5a4a34', '#c99a2e', '#3b6e5c', '#4a6fa5', '#8a5a83'];
 
 // ---------- API ----------
 async function handleApi(req, res, pathname) {
   const method = req.method;
-
-  if (pathname === '/api/state' && method === 'GET') {
-    return sendJSON(res, 200, publicState());
-  }
 
   if (pathname === '/api/login' && method === 'POST') {
     const body = await readJSONBody(req);
@@ -321,13 +344,52 @@ async function handleApi(req, res, pathname) {
     if (body.expectedRole && body.expectedRole !== role) {
       return sendJSON(res, 403, { error: `Ce compte est un compte ${employee.role}. Utilisez le bouton correspondant.` });
     }
-    return sendJSON(res, 200, { role, userId: employee.id, userName: employee.name, depotId: employee.depotId });
+    const token = createSession(employee);
+    return sendJSON(res, 200, { token, role, userId: employee.id, userName: employee.name, depotId: employee.depotId });
+  }
+
+  // Every route below requires a valid session — the app has no anonymous
+  // read/write access at all. Without this, anyone who can reach the server
+  // (guaranteed once it's hosted publicly, not just on the shop's own PC)
+  // could read the full database or mutate it via /api/state and friends
+  // without ever logging in.
+  const session = getSession(req);
+  if (!session) return sendJSON(res, 401, { error: 'Session invalide ou expirée. Veuillez vous reconnecter.' });
+  const currentUser = db.employees.find((e) => e.id === session.employeeId);
+  if (!currentUser || !currentUser.active) {
+    sessions.delete(session.token);
+    return sendJSON(res, 401, { error: 'Session invalide ou expirée. Veuillez vous reconnecter.' });
+  }
+  const isManager = session.role === 'manager';
+  // Mirrors NAV_ITEMS' managerOnly flags in app.js (Dépôts, Fournisseurs,
+  // Employés, Dépenses) plus stock-transfer, which is manager-gated the
+  // same way client-side. Every other route stays open to both roles.
+  const MANAGER_ONLY = [
+    pathname === '/api/depots' && method === 'POST',
+    pathname === '/api/suppliers' && method === 'POST',
+    pathname === '/api/employees' && method === 'POST',
+    pathname === '/api/stock-transfer' && method === 'POST',
+    pathname === '/api/expenses' && method === 'POST',
+    /^\/api\/employees\/[^/]+(\/toggle)?$/.test(pathname) && method !== 'GET',
+  ].some(Boolean);
+  if (MANAGER_ONLY && !isManager) {
+    return sendJSON(res, 403, { error: 'Action réservée au Gérant' });
+  }
+
+  if (pathname === '/api/logout' && method === 'POST') {
+    sessions.delete(session.token);
+    return sendJSON(res, 200, { ok: true });
+  }
+
+  if (pathname === '/api/state' && method === 'GET') {
+    return sendJSON(res, 200, publicState());
   }
 
   if (pathname === '/api/change-password' && method === 'POST') {
     const body = await readJSONBody(req);
-    const employee = db.employees.find((e) => e.id === body.userId);
-    if (!employee) return sendJSON(res, 404, { error: 'Compte introuvable' });
+    // Always the logged-in user's own account — body.userId is ignored so a
+    // session can never be used to change someone else's password.
+    const employee = currentUser;
     if (!verifyPassword(body.currentPassword || '', employee.passwordSalt, employee.passwordHash)) {
       return sendJSON(res, 401, { error: 'Mot de passe actuel incorrect' });
     }
