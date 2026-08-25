@@ -8,9 +8,18 @@ const crypto = require('crypto');
 const DEFAULT_PASSWORD = '1234'; // seeded/legacy accounts only — set at creation for new employees
 
 const PORT = Number(process.env.PORT) || 8791;
-const HOST = process.env.HOST || '127.0.0.1';
+// Cloud platforms (Railway, Render, ...) route traffic to the container
+// over its internal network, not 127.0.0.1 — they set PORT but not HOST,
+// so infer 0.0.0.0 whenever PORT came from the environment; local runs
+// (no PORT set) keep the previous localhost-only default unchanged.
+const HOST = process.env.HOST || (process.env.PORT ? '0.0.0.0' : '127.0.0.1');
 const PUBLIC_DIR = path.join(__dirname, 'public');
-const DB_PATH = path.join(__dirname, 'data', 'db.json');
+// DATA_DIR is separate from the app's own source location so a cloud
+// deployment can point it at a mounted persistent volume (e.g. Railway) —
+// otherwise db.json would live on the container's ephemeral filesystem and
+// be wiped on every redeploy/restart.
+const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
+const DB_PATH = path.join(DATA_DIR, 'db.json');
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
