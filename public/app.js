@@ -78,7 +78,7 @@ const state = {
   currentDepotId: '', // depot the signed-in user is currently operating / selling from
   stockDepotFilter: '', dashDepotFilter: '', repDepotFilter: '', expenseDepotFilter: '', // 'all' or a depot id
   cart: [], posCategory: 'all', posSearch: '', posClientId: '', paymentMethod: 'Espèces', posAdvance: '',
-  scanInput: '', showScanner: false, scanError: null,
+  scanInput: '', showScanner: false, scanError: null, scanMode: 'sell', scanDevices: [], scanDeviceId: '',
   stockSearch: '', stockCatFilter: 'all', showAddProduct: false,
   npName: '', npBarcode: '', npCategoryId: '', npSupplierId: '', npDepotId: '', npPrice: '', npCost: '', npStock: '', npMinStock: '',
   npUnitsPerPack: '', npPricePerPack: '', npUnitsPerCarton: '', npPricePerCarton: '', editingProductId: null,
@@ -301,7 +301,22 @@ function handleDetectedCode(code) {
   const now = Date.now();
   if (lastCode === code && now - lastCodeAt < 1500) return;
   lastCode = code; lastCodeAt = now;
+  if (state.scanMode === 'register') {
+    state.npBarcode = code;
+    state.showScanner = false;
+    state.scanError = null;
+    flashToast('Code-barres capturé : ' + code);
+    return;
+  }
   lookupAndAddByBarcode(code);
+}
+async function refreshScanDevices() {
+  if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) return;
+  try {
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    state.scanDevices = devices.filter((d) => d.kind === 'videoinput');
+    rerender();
+  } catch (e) {}
 }
 function startCamera() {
   if (!window.ZXing || !window.ZXing.BrowserMultiFormatReader) {
@@ -311,16 +326,22 @@ function startCamera() {
   }
   try {
     zxingReader = new window.ZXing.BrowserMultiFormatReader();
-    zxingReader.decodeFromVideoDevice(undefined, 'scanner-video', (result) => {
+    zxingReader.decodeFromVideoDevice(state.scanDeviceId || undefined, 'scanner-video', (result) => {
       if (!scanningActive || !result) return;
       handleDetectedCode(result.getText());
-    }).catch(() => { state.scanError = 'Accès à la caméra refusé ou indisponible.'; rerender(); });
+    }).then(() => refreshScanDevices()).catch(() => { state.scanError = 'Accès à la caméra refusé ou indisponible.'; rerender(); });
   } catch (e) {
     state.scanError = 'Accès à la caméra refusé ou indisponible.'; rerender();
   }
 }
 function stopCamera() {
   if (zxingReader) { try { zxingReader.reset(); } catch (e) {} zxingReader = null; }
+}
+function switchCameraDevice(deviceId) {
+  state.scanDeviceId = deviceId;
+  stopCamera();
+  scanningActive = true;
+  startCamera();
 }
 function syncScanner() {
   if (state.showScanner && !scanningActive) { scanningActive = true; startCamera(); }
@@ -799,7 +820,7 @@ function renderCaisse() {
       </div>
       <div style="display:flex;gap:10px;margin-bottom:6px">
         <input id="field-scanInput" type="text" class="field-lg" style="flex:1" placeholder="Scanner ou saisir un code-barres..." value="${esc(state.scanInput)}" data-bind="scanInput" />
-        <div class="camera-btn" data-action="openScanner">${ICON_CAMERA} Caméra</div>
+        <div class="camera-btn" data-action="openScanner" data-mode="sell" title="Scanner avec une caméra (webcam ou téléphone)">${ICON_CAMERA} Caméra</div>
       </div>
       ${errorHtml}
       <div class="pos-cat-tabs">${catTabs}</div>
@@ -866,8 +887,11 @@ function renderStocks() {
   const isEditingProduct = !!state.editingProductId;
   const addFormHtml = state.showAddProduct ? `<div class="add-form cols-4">
     <input id="field-npName" class="field" type="text" placeholder="Nom du produit" value="${esc(state.npName)}" data-bind="npName" />
-    <input id="field-npBarcode" class="field" type="text" placeholder="Code-barres (scanner USB ou saisir)" autofocus value="${esc(state.npBarcode)}" data-bind="npBarcode" />
-    <div class="pos-hint" style="grid-column:1/-1;margin:0">Astuce : cliquez dans le champ code-barres puis scannez le produit avec un lecteur USB — le code s'y saisit tout seul. Laissez vide pour générer un code interne automatiquement.</div>
+    <div style="display:flex;gap:6px">
+      <input id="field-npBarcode" class="field" style="flex:1" type="text" placeholder="Code-barres (scanner USB ou saisir)" autofocus value="${esc(state.npBarcode)}" data-bind="npBarcode" />
+      <div class="camera-btn" data-action="openScanner" data-mode="register" title="Scanner avec une caméra (webcam ou téléphone)">${ICON_CAMERA}</div>
+    </div>
+    <div class="pos-hint" style="grid-column:1/-1;margin:0">Astuce : cliquez dans le champ code-barres puis scannez le produit avec un lecteur USB — le code s'y saisit tout seul. Ou utilisez le bouton caméra pour scanner avec une webcam ou un téléphone connecté au PC. Laissez vide pour générer un code interne automatiquement.</div>
     <select id="field-npCategoryId" class="field" data-bind="npCategoryId">${npCatOptions}</select>
     <select id="field-npSupplierId" class="field" data-bind="npSupplierId">${npSupOptions}</select>
     ${isEditingProduct ? '' : `<select id="field-npDepotId" class="field" data-bind="npDepotId" title="Dépôt de réception du stock initial">${npDepotOptions}</select>`}
@@ -1278,12 +1302,19 @@ function renderAccount() {
 function renderScannerModal() {
   if (!state.showScanner) return '';
   const errorHtml = state.scanError ? `<div class="pos-error" style="text-align:center;margin-top:8px">${esc(state.scanError)}</div>` : '';
+  const deviceOptions = state.scanDevices.map((d, i) => `<option value="${esc(d.deviceId)}"${state.scanDeviceId === d.deviceId ? ' selected' : ''}>${esc(d.label || 'Caméra ' + (i + 1))}</option>`).join('');
+  const deviceSelectHtml = state.scanDevices.length > 1
+    ? `<select id="field-scanDeviceId" class="field" style="margin-top:10px" data-bind="scanDeviceId">${deviceOptions}</select>
+       <div class="pos-hint" style="text-align:center;margin-top:4px">Un téléphone utilisé comme webcam (via une appli comme DroidCam/Iriun) apparaît ici — sélectionnez-le pour scanner avec.</div>`
+    : '';
+  const title = state.scanMode === 'register' ? 'Scanner le code-barres du produit' : 'Scanner un produit';
   return `<div class="modal-overlay">
     <div class="modal-card scanner-modal">
-      <div class="modal-header"><div class="modal-title">Scanner un produit</div><div class="modal-close" data-action="closeScanner">×</div></div>
+      <div class="modal-header"><div class="modal-title">${title}</div><div class="modal-close" data-action="closeScanner">×</div></div>
       <div class="modal-body">
         <div class="scanner-frame"><video id="scanner-video" autoplay muted playsinline></video><div class="scanner-reticle"></div></div>
         <div class="scanner-hint">Placez le code-barres ou QR code du produit devant la caméra.</div>
+        ${deviceSelectHtml}
         ${errorHtml}
       </div>
       <div class="modal-footer"><div class="modal-footer-btn secondary" style="flex:1" data-action="closeScanner">Fermer</div></div>
@@ -1359,7 +1390,7 @@ const Actions = {
   setPayCard: () => { state.paymentMethod = 'Carte'; state.posAdvance = ''; rerender(); },
   setPayCredit: () => { state.paymentMethod = 'Crédit'; rerender(); },
   checkout: () => checkout(),
-  openScanner: () => { state.showScanner = true; state.scanError = null; rerender(); },
+  openScanner: (ds) => { state.showScanner = true; state.scanMode = (ds && ds.mode) || 'sell'; state.scanError = null; rerender(); },
   closeScanner: () => { state.showScanner = false; state.scanError = null; rerender(); },
   toggleAddProduct: () => { if (state.showAddProduct) resetProductForm(); else openAddProductForm(); rerender(); },
   editProduct: (ds) => { openEditProductForm(ds.id); rerender(); },
@@ -1463,6 +1494,11 @@ function onChange(e) {
     // A unit picked for the previous product may not apply to the new one
     // (e.g. it has no carton configured) — reset to avoid a stale mismatch.
     state.rsUnit = 'detail';
+  } else if (bind === 'scanDeviceId') {
+    // Switching camera (e.g. to a phone used as a webcam) needs the video
+    // stream itself restarted, not just the state value updated.
+    switchCameraDevice(el.value);
+    return;
   }
   rerender();
 }
