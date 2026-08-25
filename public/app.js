@@ -20,6 +20,10 @@ const ICON_RESTOCK = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none
 const ICON_CAMERA = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"></rect><rect x="14" y="3" width="7" height="7" rx="1"></rect><rect x="3" y="14" width="7" height="7" rx="1"></rect><path d="M14 14h3v3h-3zM20 14v7M14 20h4"></path></svg>';
 const ICON_CREDIT = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="5" width="20" height="14" rx="2"></rect><path d="M2 10h20"></path><path d="M6 15h4"></path></svg>';
 const ICON_EXPENSE = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="6" width="20" height="12" rx="2"></rect><circle cx="12" cy="12" r="3"></circle><path d="M6 9v.01M18 15v.01"></path></svg>';
+const ICON_FACTURATION = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 2.5h8l4 4v14.5a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V3.5a1 1 0 0 1 1-1z"></path><path d="M14 2.5V6.5h4"></path><path d="M7.5 12h5M7.5 15h5M7.5 18h3"></path></svg>';
+const ICON_EXTERNAL = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3"><path d="M9 5H5a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-4"></path><path d="M15 3h6v6"></path><path d="M10 14 21 3"></path></svg>';
+
+const FNE_URL = 'https://fne.dgi.gouv.ci';
 
 const EXPENSE_CATEGORIES = ['Salaires', 'Facture CIE', 'Facture SODECI', 'Paiement fournisseur', 'Achat marchandise', 'Don personnel', 'Imprévus', 'Autre'];
 
@@ -44,6 +48,7 @@ const NAV_ITEMS = [
   { key: 'clients', label: 'Clients', icon: ICON_CLIENTS, managerOnly: false },
   { key: 'credits', label: 'Crédits', icon: ICON_CREDIT, managerOnly: false },
   { key: 'expenses', label: 'Dépenses', icon: ICON_EXPENSE, managerOnly: true },
+  { key: 'facturation', label: 'Facturation', icon: ICON_FACTURATION, managerOnly: false, external: FNE_URL },
   { key: 'rapports', label: 'Rapports', icon: ICON_RAPPORTS, managerOnly: true },
   { key: 'employes', label: 'Employés', icon: ICON_EMP, managerOnly: true },
   { key: 'account', label: 'Mon compte', icon: ICON_ACCOUNT, managerOnly: false },
@@ -615,6 +620,9 @@ function renderShell() {
 function renderSidebar() {
   const isManager = state.role === 'manager';
   const navHtml = NAV_ITEMS.filter((n) => !n.managerOnly || isManager).map((n) => {
+    if (n.external) {
+      return `<div class="nav-item" data-action="openExternal" data-url="${esc(n.external)}" title="Ouvre dans un nouvel onglet">${n.icon}<span style="flex:1">${n.label}</span><span style="opacity:.55">${ICON_EXTERNAL}</span></div>`;
+    }
     const active = state.screen === n.key;
     return `<div class="nav-item${active ? ' active' : ''}" data-action="nav" data-screen="${n.key}">${n.icon}<span>${n.label}</span></div>`;
   }).join('');
@@ -1337,6 +1345,7 @@ const Actions = {
   submitLogin: () => submitLogin(),
   logout: () => logout(),
   nav: (ds) => { state.screen = ds.screen; state.pwError = null; state.pwSuccess = null; state.confirmDeleteEmployeeId = null; rerender(); },
+  openExternal: (ds) => { window.open(ds.url, '_blank', 'noopener'); },
   setPosCatAll: () => { state.posCategory = 'all'; rerender(); },
   setPosCategory: (ds) => { state.posCategory = ds.id; rerender(); },
   addToCart: (ds) => addToCart(ds.id, ds.unit),
