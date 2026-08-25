@@ -339,7 +339,17 @@ function startCamera() {
     return;
   }
   try {
-    zxingReader = new window.ZXing.BrowserMultiFormatReader();
+    // Restricting to the formats actually used here (retail barcodes + QR)
+    // skips the decoder's attempts at every other 1D/2D format on each
+    // frame, and scanning every 80ms instead of the 500ms default makes a
+    // detection register almost as soon as the code is in frame.
+    const hints = new Map();
+    hints.set(window.ZXing.DecodeHintType.POSSIBLE_FORMATS, [
+      window.ZXing.BarcodeFormat.EAN_13, window.ZXing.BarcodeFormat.EAN_8,
+      window.ZXing.BarcodeFormat.UPC_A, window.ZXing.BarcodeFormat.UPC_E,
+      window.ZXing.BarcodeFormat.CODE_128, window.ZXing.BarcodeFormat.QR_CODE,
+    ]);
+    zxingReader = new window.ZXing.BrowserMultiFormatReader(hints, 80);
     zxingReader.decodeFromVideoDevice(state.scanDeviceId || undefined, 'scanner-video', (result) => {
       if (!scanningActive || !result) return;
       handleDetectedCode(result.getText());
