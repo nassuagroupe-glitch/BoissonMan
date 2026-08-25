@@ -380,6 +380,7 @@ async function handleApi(req, res, pathname) {
     pathname === '/api/stock-transfer' && method === 'POST',
     pathname === '/api/expenses' && method === 'POST',
     /^\/api\/employees\/[^/]+(\/toggle)?$/.test(pathname) && method !== 'GET',
+    pathname === '/api/admin/restore' && method === 'POST',
   ].some(Boolean);
   if (MANAGER_ONLY && !isManager) {
     return sendJSON(res, 403, { error: 'Action réservée au Gérant' });
@@ -388,6 +389,21 @@ async function handleApi(req, res, pathname) {
   if (pathname === '/api/logout' && method === 'POST') {
     sessions.delete(session.token);
     return sendJSON(res, 200, { ok: true });
+  }
+
+  // TEMPORARY — one-time migration path used to seed this deployment with
+  // the real shop data from the local dev machine. Remove this route once
+  // that transfer is done; it's a full-database overwrite and shouldn't
+  // stay reachable indefinitely just because it happens to be manager-gated.
+  if (pathname === '/api/admin/restore' && method === 'POST') {
+    const body = await readJSONBody(req);
+    const required = ['depots', 'categories', 'suppliers', 'products', 'clients', 'employees', 'sales'];
+    if (!required.every((k) => Array.isArray(body[k]))) {
+      return sendJSON(res, 400, { error: 'Format de sauvegarde invalide' });
+    }
+    db = Object.assign({}, body, { expenses: Array.isArray(body.expenses) ? body.expenses : [] });
+    saveDB(db);
+    return sendJSON(res, 200, { ok: true, counts: { depots: db.depots.length, products: db.products.length, employees: db.employees.length, sales: db.sales.length } });
   }
 
   if (pathname === '/api/state' && method === 'GET') {
