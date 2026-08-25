@@ -1,5 +1,6 @@
 // BoissonMan — serveur local (aucune dépendance npm).
-// Sert l'app statique (public/) et une API JSON persistée dans data/db.json.
+// Sert l'app statique (public/) et une API JSON multi-boutiques (chaque
+// boutique = un tenant isolé) persistée sous data/tenants/<id>/db.json.
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
@@ -16,10 +17,19 @@ const HOST = process.env.HOST || (process.env.PORT ? '0.0.0.0' : '127.0.0.1');
 const PUBLIC_DIR = path.join(__dirname, 'public');
 // DATA_DIR is separate from the app's own source location so a cloud
 // deployment can point it at a mounted persistent volume (e.g. Railway) —
-// otherwise db.json would live on the container's ephemeral filesystem and
+// otherwise data would live on the container's ephemeral filesystem and
 // be wiped on every redeploy/restart.
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
-const DB_PATH = path.join(DATA_DIR, 'db.json');
+// Pre-multi-tenant layout: a single flat db.json directly under DATA_DIR.
+// Kept only as a migration source (see migrateSingleTenantLayout below).
+const LEGACY_DB_PATH = path.join(DATA_DIR, 'db.json');
+const TENANTS_DIR = path.join(DATA_DIR, 'tenants');
+const TENANTS_META_PATH = path.join(TENANTS_DIR, 'tenants.json');
+// Shared secret for the owner-only shop-management endpoints
+// (POST/GET /api/admin/tenants). Not a per-user login — there is exactly
+// one operator (the platform owner) who creates shops; per-shop Gérants
+// never see or use this. Must be set via env var to enable those routes.
+const ADMIN_SECRET = process.env.ADMIN_SECRET || '';
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -180,10 +190,10 @@ function buildSeed() {
   return { depots, categories, suppliers, products, clients, employees, sales, expenses };
 }
 
-// Upgrades a pre-multi-dépôt db.json (flat product.stock, no depots) in
+// Upgrades a pre-multi-dépôt tenant db (flat product.stock, no depots) in
 // place. Existing stock is preserved by putting all of it into a single new
 // "Dépôt principal" depot — splitting it across invented depots would
-// misrepresent real inventory the user already entered.
+// misrepresent real inventory already entered.
 function migrateToDepots(data) {
   let changed = false;
   if (!Array.isArray(data.depots) || data.depots.length === 0) {
@@ -219,16 +229,10 @@ function migrateToDepots(data) {
   });
   return changed;
 }
-
-// ---------- Persistence ----------
-function loadDB() {
-  if (!fs.existsSync(DB_PATH)) {
-    const seed = buildSeed();
-    fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
-    fs.writeFileSync(DB_PATH, JSON.stringify(seed, null, 2));
-    return seed;
-  }
-  const data = JSON.parse(fs.readFileSync(DB_PATH, 'utf8'));
+// Per-tenant migrations that used to run in the old single-tenant loadDB();
+// applied to every tenant on every boot so an older tenant db.json on disk
+// keeps working after a code update, same as before multi-tenancy existed.
+function migrateTenantData(data) {
   let changed = migrateToDepots(data);
   if (!Array.isArray(data.expenses)) { data.expenses = []; changed = true; }
   (data.products || []).forEach((p) => {
@@ -237,14 +241,60 @@ function loadDB() {
       changed = true;
     }
   });
-  if (changed) fs.writeFileSync(DB_PATH, JSON.stringify(data, null, 2));
-  return data;
-}
-function saveDB(db) {
-  fs.writeFileSync(DB_PATH, JSON.stringify(db, null, 2));
+  return changed;
 }
 
-let db = loadDB();
+// ---------- Persistence (multi-tenant) ----------
+const tenants = new Map(); // tenantId -> db object ({depots, categories, ...})
+let tenantsMeta = []; // [{id, name, createdAt}], mirrors tenants.keys()
+
+function tenantDbPath(id) {
+  return path.join(TENANTS_DIR, id, 'db.json');
+}
+function saveTenant(id) {
+  const p = tenantDbPath(id);
+  fs.mkdirSync(path.dirname(p), { recursive: true });
+  fs.writeFileSync(p, JSON.stringify(tenants.get(id), null, 2));
+}
+function saveTenantsMeta() {
+  fs.mkdirSync(TENANTS_DIR, { recursive: true });
+  fs.writeFileSync(TENANTS_META_PATH, JSON.stringify(tenantsMeta, null, 2));
+}
+// One-time upgrade from the pre-multi-tenant layout (a single flat
+// DATA_DIR/db.json) into tenants/default/db.json. Only runs when there is
+// no tenants.json yet at all — never overwrites an existing multi-tenant
+// setup, and the original flat file is left in place afterward (untouched,
+// not deleted) as a safety net rather than removed.
+function migrateSingleTenantLayout() {
+  if (fs.existsSync(TENANTS_META_PATH)) return false;
+  if (!fs.existsSync(LEGACY_DB_PATH)) return false;
+  const data = JSON.parse(fs.readFileSync(LEGACY_DB_PATH, 'utf8'));
+  migrateTenantData(data);
+  const id = 'default';
+  fs.mkdirSync(path.dirname(tenantDbPath(id)), { recursive: true });
+  fs.writeFileSync(tenantDbPath(id), JSON.stringify(data, null, 2));
+  tenantsMeta = [{ id, name: 'Boutique principale', createdAt: new Date().toISOString() }];
+  saveTenantsMeta();
+  return true;
+}
+function loadAllTenants() {
+  fs.mkdirSync(TENANTS_DIR, { recursive: true });
+  migrateSingleTenantLayout();
+  if (fs.existsSync(TENANTS_META_PATH)) {
+    tenantsMeta = JSON.parse(fs.readFileSync(TENANTS_META_PATH, 'utf8'));
+  } else {
+    tenantsMeta = []; // fresh install, no shop created yet — see POST /api/admin/tenants
+  }
+  tenants.clear();
+  tenantsMeta.forEach((t) => {
+    const p = tenantDbPath(t.id);
+    if (!fs.existsSync(p)) return; // meta/data got out of sync — skip rather than crash
+    const data = JSON.parse(fs.readFileSync(p, 'utf8'));
+    if (migrateTenantData(data)) fs.writeFileSync(p, JSON.stringify(data, null, 2));
+    tenants.set(t.id, data);
+  });
+}
+loadAllTenants();
 
 // ---------- Helpers ----------
 function uid(prefix) {
@@ -281,7 +331,7 @@ function packagingInfo(product, unit) {
   return { price: product.price, multiplier: 1 };
 }
 // True if removing/demoting/deactivating employeeId would leave zero active Gérant accounts.
-function lastActiveManager(employeeId) {
+function lastActiveManager(db, employeeId) {
   return db.employees.filter((e) => e.role === 'Gérant' && e.active && e.id !== employeeId).length === 0;
 }
 function hashPassword(password, salt) {
@@ -301,8 +351,38 @@ function publicEmployee(e) {
   const { passwordHash, passwordSalt, ...rest } = e;
   return rest;
 }
-function publicState() {
+function publicState(db) {
   return Object.assign({}, db, { employees: db.employees.map(publicEmployee) });
+}
+// Finds which tenant a login username (phone or name, case-insensitive)
+// belongs to. Login has no separate "shop code" field by design — phone
+// numbers are enforced unique across every tenant at employee-creation time
+// (see POST /api/employees and POST /api/admin/tenants) specifically so this
+// lookup is unambiguous. Name-based login keeps the same best-effort
+// small-team assumption it always had, just platform-wide now instead of
+// per-shop.
+function findEmployeeAcrossTenants(username) {
+  for (const [tenantId, db] of tenants) {
+    const employee = db.employees.find((e) =>
+      e.phone === username || e.name.toLowerCase() === username.toLowerCase());
+    if (employee) return { tenantId, db, employee };
+  }
+  return null;
+}
+function phoneUsedByAnyTenant(phone) {
+  if (!phone) return false;
+  for (const db of tenants.values()) {
+    if (db.employees.some((e) => e.phone === phone)) return true;
+  }
+  return false;
+}
+function checkAdminSecret(req) {
+  if (!ADMIN_SECRET) return false;
+  const provided = String(req.headers['x-admin-secret'] || '');
+  const a = Buffer.from(provided);
+  const b = Buffer.from(ADMIN_SECRET);
+  if (a.length !== b.length) return false;
+  return crypto.timingSafeEqual(a, b);
 }
 
 // ---------- Sessions ----------
@@ -310,11 +390,12 @@ function publicState() {
 // just forces everyone to log in again — acceptable since the client never
 // persisted login across a page reload anyway (see app.js: authToken lives
 // in a JS variable, never localStorage).
-const sessions = new Map(); // token -> { employeeId, role, createdAt }
+const sessions = new Map(); // token -> { tenantId, employeeId, role, createdAt }
 const SESSION_TTL_MS = 12 * 60 * 60 * 1000; // 12h
-function createSession(employee) {
+function createSession(tenantId, employee) {
   const token = crypto.randomBytes(32).toString('hex');
   sessions.set(token, {
+    tenantId,
     employeeId: employee.id,
     role: employee.role === 'Gérant' ? 'manager' : 'cashier',
     createdAt: Date.now(),
@@ -329,7 +410,7 @@ function getSession(req) {
   const session = sessions.get(token);
   if (!session) return null;
   if (Date.now() - session.createdAt > SESSION_TTL_MS) { sessions.delete(token); return null; }
-  return { token, employeeId: session.employeeId, role: session.role };
+  return { token, tenantId: session.tenantId, employeeId: session.employeeId, role: session.role };
 }
 
 const CAT_PALETTE = ['#c1440e', '#b8862f', '#2f7f9e', '#d9812f', '#7d3b56', '#5a4a34', '#c99a2e', '#3b6e5c', '#4a6fa5', '#8a5a83'];
@@ -343,18 +424,55 @@ async function handleApi(req, res, pathname) {
     const username = (body.username || '').trim();
     const password = body.password || '';
     if (!username || !password) return sendJSON(res, 400, { error: 'Identifiant et mot de passe requis' });
-    const employee = db.employees.find((e) =>
-      e.phone === username || e.name.toLowerCase() === username.toLowerCase());
-    if (!employee || !verifyPassword(password, employee.passwordSalt, employee.passwordHash)) {
+    const found = findEmployeeAcrossTenants(username);
+    if (!found || !verifyPassword(password, found.employee.passwordSalt, found.employee.passwordHash)) {
       return sendJSON(res, 401, { error: 'Identifiant ou mot de passe incorrect' });
     }
+    const { tenantId, employee } = found;
     if (!employee.active) return sendJSON(res, 403, { error: 'Ce compte est désactivé' });
     const role = employee.role === 'Gérant' ? 'manager' : 'cashier';
     if (body.expectedRole && body.expectedRole !== role) {
       return sendJSON(res, 403, { error: `Ce compte est un compte ${employee.role}. Utilisez le bouton correspondant.` });
     }
-    const token = createSession(employee);
+    const token = createSession(tenantId, employee);
     return sendJSON(res, 200, { token, role, userId: employee.id, userName: employee.name, depotId: employee.depotId });
+  }
+
+  // Owner-only shop management — a separate auth mechanism (shared secret
+  // header, not a session token) since it isn't scoped to any one tenant.
+  // Disabled entirely unless ADMIN_SECRET is configured server-side.
+  if (pathname === '/api/admin/tenants' && method === 'POST') {
+    if (!checkAdminSecret(req)) return sendJSON(res, 403, { error: 'Non autorisé' });
+    const body = await readJSONBody(req);
+    const shopName = (body.shopName || '').trim();
+    const managerName = (body.managerName || '').trim();
+    const managerPhone = (body.managerPhone || '').trim();
+    const managerPassword = body.managerPassword || '';
+    if (!shopName || !managerName || !managerPhone) return sendJSON(res, 400, { error: 'shopName, managerName et managerPhone sont requis' });
+    if (managerPassword.length < 4) return sendJSON(res, 400, { error: 'Mot de passe trop court (4 caractères minimum)' });
+    if (phoneUsedByAnyTenant(managerPhone)) return sendJSON(res, 409, { error: 'Ce numéro de téléphone est déjà utilisé sur une autre boutique' });
+    const tenantId = uid('t');
+    const managerEmployee = Object.assign(
+      { id: uid('e'), name: managerName, role: 'Gérant', phone: managerPhone, active: true, depotId: null },
+      hashPassword(managerPassword)
+    );
+    const newDb = {
+      depots: [{ id: 'd1', name: 'Dépôt principal', address: '' }],
+      categories: [], suppliers: [], products: [], clients: [],
+      employees: [managerEmployee], sales: [], expenses: [],
+    };
+    tenants.set(tenantId, newDb);
+    tenantsMeta.push({ id: tenantId, name: shopName, createdAt: new Date().toISOString() });
+    saveTenant(tenantId);
+    saveTenantsMeta();
+    return sendJSON(res, 201, { tenantId, shopName });
+  }
+  if (pathname === '/api/admin/tenants' && method === 'GET') {
+    if (!checkAdminSecret(req)) return sendJSON(res, 403, { error: 'Non autorisé' });
+    return sendJSON(res, 200, tenantsMeta.map((t) => ({
+      id: t.id, name: t.name, createdAt: t.createdAt,
+      employeeCount: (tenants.get(t.id) || { employees: [] }).employees.length,
+    })));
   }
 
   // Every route below requires a valid session — the app has no anonymous
@@ -364,6 +482,8 @@ async function handleApi(req, res, pathname) {
   // without ever logging in.
   const session = getSession(req);
   if (!session) return sendJSON(res, 401, { error: 'Session invalide ou expirée. Veuillez vous reconnecter.' });
+  const db = tenants.get(session.tenantId);
+  if (!db) { sessions.delete(session.token); return sendJSON(res, 401, { error: 'Session invalide ou expirée. Veuillez vous reconnecter.' }); }
   const currentUser = db.employees.find((e) => e.id === session.employeeId);
   if (!currentUser || !currentUser.active) {
     sessions.delete(session.token);
@@ -391,7 +511,7 @@ async function handleApi(req, res, pathname) {
   }
 
   if (pathname === '/api/state' && method === 'GET') {
-    return sendJSON(res, 200, publicState());
+    return sendJSON(res, 200, publicState(db));
   }
 
   if (pathname === '/api/change-password' && method === 'POST') {
@@ -405,7 +525,7 @@ async function handleApi(req, res, pathname) {
     const newPassword = body.newPassword || '';
     if (newPassword.length < 4) return sendJSON(res, 400, { error: 'Le nouveau mot de passe doit contenir au moins 4 caractères' });
     Object.assign(employee, hashPassword(newPassword));
-    saveDB(db);
+    saveTenant(session.tenantId);
     return sendJSON(res, 200, { ok: true });
   }
 
@@ -415,7 +535,7 @@ async function handleApi(req, res, pathname) {
     if (!name) return sendJSON(res, 400, { error: 'Nom requis' });
     const depot = { id: uid('d'), name, address: body.address || '' };
     db.depots.push(depot);
-    saveDB(db);
+    saveTenant(session.tenantId);
     return sendJSON(res, 201, depot);
   }
 
@@ -426,7 +546,7 @@ async function handleApi(req, res, pathname) {
     const color = CAT_PALETTE[db.categories.length % CAT_PALETTE.length];
     const category = { id: uid('c'), name, color };
     db.categories.push(category);
-    saveDB(db);
+    saveTenant(session.tenantId);
     return sendJSON(res, 201, category);
   }
 
@@ -436,7 +556,7 @@ async function handleApi(req, res, pathname) {
     if (!name) return sendJSON(res, 400, { error: 'Nom requis' });
     const supplier = { id: uid('s'), name, phone: body.phone || '', email: body.email || '' };
     db.suppliers.push(supplier);
-    saveDB(db);
+    saveTenant(session.tenantId);
     return sendJSON(res, 201, supplier);
   }
 
@@ -446,7 +566,7 @@ async function handleApi(req, res, pathname) {
     if (!name) return sendJSON(res, 400, { error: 'Nom requis' });
     const client = { id: uid('cl'), name, phone: body.phone || '', points: 0, totalSpent: 0 };
     db.clients.push(client);
-    saveDB(db);
+    saveTenant(session.tenantId);
     return sendJSON(res, 201, client);
   }
 
@@ -456,13 +576,18 @@ async function handleApi(req, res, pathname) {
     if (!name) return sendJSON(res, 400, { error: 'Nom requis' });
     const password = body.password || '';
     if (password.length < 4) return sendJSON(res, 400, { error: 'Mot de passe trop court (4 caractères minimum)' });
+    const phone = (body.phone || '').trim();
+    // Phone must be unique across ALL tenants, not just this one — login
+    // has no separate shop-code field, so it's what resolves which shop an
+    // employee belongs to (see findEmployeeAcrossTenants above).
+    if (phoneUsedByAnyTenant(phone)) return sendJSON(res, 409, { error: 'Ce numéro de téléphone est déjà utilisé par un autre employé' });
     const role = body.role === 'Gérant' ? 'Gérant' : 'Caissier';
     const employee = Object.assign({
-      id: uid('e'), name, role, phone: body.phone || '', active: true,
+      id: uid('e'), name, role, phone, active: true,
       depotId: body.depotId || null,
     }, hashPassword(password));
     db.employees.push(employee);
-    saveDB(db);
+    saveTenant(session.tenantId);
     return sendJSON(res, 201, publicEmployee(employee));
   }
 
@@ -470,11 +595,11 @@ async function handleApi(req, res, pathname) {
   if (empToggleMatch && method === 'PATCH') {
     const employee = db.employees.find((e) => e.id === empToggleMatch[1]);
     if (!employee) return sendJSON(res, 404, { error: 'Employé introuvable' });
-    if (employee.active && employee.role === 'Gérant' && lastActiveManager(employee.id)) {
+    if (employee.active && employee.role === 'Gérant' && lastActiveManager(db, employee.id)) {
       return sendJSON(res, 409, { error: 'Impossible de désactiver le dernier compte Gérant actif' });
     }
     employee.active = !employee.active;
-    saveDB(db);
+    saveTenant(session.tenantId);
     return sendJSON(res, 200, publicEmployee(employee));
   }
 
@@ -490,25 +615,31 @@ async function handleApi(req, res, pathname) {
     }
     if (body.role !== undefined) {
       const newRole = body.role === 'Gérant' ? 'Gérant' : 'Caissier';
-      if (employee.role === 'Gérant' && newRole !== 'Gérant' && employee.active && lastActiveManager(employee.id)) {
+      if (employee.role === 'Gérant' && newRole !== 'Gérant' && employee.active && lastActiveManager(db, employee.id)) {
         return sendJSON(res, 409, { error: 'Impossible de rétrograder le dernier compte Gérant actif' });
       }
       employee.role = newRole;
     }
-    if (body.phone !== undefined) employee.phone = body.phone;
+    if (body.phone !== undefined) {
+      const phone = body.phone.trim();
+      if (phone && phone !== employee.phone && phoneUsedByAnyTenant(phone)) {
+        return sendJSON(res, 409, { error: 'Ce numéro de téléphone est déjà utilisé par un autre employé' });
+      }
+      employee.phone = phone;
+    }
     if (body.depotId !== undefined) employee.depotId = body.depotId || null;
-    saveDB(db);
+    saveTenant(session.tenantId);
     return sendJSON(res, 200, publicEmployee(employee));
   }
 
   if (empUpdateMatch && method === 'DELETE') {
     const employee = db.employees.find((e) => e.id === empUpdateMatch[1]);
     if (!employee) return sendJSON(res, 404, { error: 'Employé introuvable' });
-    if (employee.active && employee.role === 'Gérant' && lastActiveManager(employee.id)) {
+    if (employee.active && employee.role === 'Gérant' && lastActiveManager(db, employee.id)) {
       return sendJSON(res, 409, { error: 'Impossible de supprimer le dernier compte Gérant actif' });
     }
     db.employees = db.employees.filter((e) => e.id !== employee.id);
-    saveDB(db);
+    saveTenant(session.tenantId);
     return sendJSON(res, 200, { ok: true });
   }
 
@@ -539,7 +670,7 @@ async function handleApi(req, res, pathname) {
       pricePerCarton: Number(body.pricePerCarton) || 0,
     };
     db.products.push(product);
-    saveDB(db);
+    saveTenant(session.tenantId);
     return sendJSON(res, 201, product);
   }
 
@@ -569,7 +700,7 @@ async function handleApi(req, res, pathname) {
     if (body.pricePerPack !== undefined) product.pricePerPack = Number(body.pricePerPack) || 0;
     if (body.unitsPerCarton !== undefined) product.unitsPerCarton = Number(body.unitsPerCarton) || 0;
     if (body.pricePerCarton !== undefined) product.pricePerCarton = Number(body.pricePerCarton) || 0;
-    saveDB(db);
+    saveTenant(session.tenantId);
     return sendJSON(res, 200, product);
   }
 
@@ -582,7 +713,7 @@ async function handleApi(req, res, pathname) {
     if (!depotId || !db.depots.some((d) => d.id === depotId)) return sendJSON(res, 400, { error: 'Dépôt invalide' });
     const delta = Number(body.delta) || 0;
     product.stockByDepot[depotId] = Math.max(0, stockAt(product, depotId) + delta);
-    saveDB(db);
+    saveTenant(session.tenantId);
     return sendJSON(res, 200, product);
   }
 
@@ -597,7 +728,7 @@ async function handleApi(req, res, pathname) {
     if (stockAt(product, fromDepotId) < qty) return sendJSON(res, 409, { error: 'Stock insuffisant au dépôt source' });
     product.stockByDepot[fromDepotId] -= qty;
     product.stockByDepot[toDepotId] = stockAt(product, toDepotId) + qty;
-    saveDB(db);
+    saveTenant(session.tenantId);
     return sendJSON(res, 200, product);
   }
 
@@ -672,7 +803,7 @@ async function handleApi(req, res, pathname) {
       sale.creditPayments = advance > 0 ? [{ id: uid('pay'), date: sale.date, amount: advance }] : [];
     }
     db.sales.unshift(sale);
-    saveDB(db);
+    saveTenant(session.tenantId);
     return sendJSON(res, 201, { sale });
   }
 
@@ -690,7 +821,7 @@ async function handleApi(req, res, pathname) {
     sale.creditPayments.push({ id: uid('pay'), date: new Date().toISOString(), amount });
     sale.creditPaid += amount;
     sale.creditRemaining -= amount;
-    saveDB(db);
+    saveTenant(session.tenantId);
     return sendJSON(res, 200, sale);
   }
 
@@ -713,7 +844,7 @@ async function handleApi(req, res, pathname) {
       recordedBy: body.recordedBy || '',
     };
     db.expenses.unshift(expense);
-    saveDB(db);
+    saveTenant(session.tenantId);
     return sendJSON(res, 201, expense);
   }
 
