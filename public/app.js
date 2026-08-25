@@ -78,6 +78,7 @@ const state = {
   currentDepotId: '', // depot the signed-in user is currently operating / selling from
   stockDepotFilter: '', dashDepotFilter: '', repDepotFilter: '', expenseDepotFilter: '', // 'all' or a depot id
   cart: [], posCategory: 'all', posSearch: '', posClientId: '', paymentMethod: 'Espèces', posAdvance: '',
+  showUnitPicker: false, unitPickerProductId: null,
   scanInput: '', showScanner: false, scanError: null, scanMode: 'sell', scanDevices: [], scanDeviceId: '',
   stockSearch: '', stockCatFilter: 'all', showAddProduct: false,
   npName: '', npBarcode: '', npCategoryId: '', npSupplierId: '', npDepotId: '', npPrice: '', npCost: '', npStock: '', npMinStock: '',
@@ -232,6 +233,8 @@ function addToCart(productId, unit) {
   if (usedBase + pkg.multiplier > available) return;
   if (existing) existing.qty++;
   else state.cart.push({ productId, unit, qty: 1 });
+  state.showUnitPicker = false;
+  state.unitPickerProductId = null;
   rerender();
 }
 function changeCartQty(productId, unit, delta) {
@@ -644,6 +647,7 @@ function renderShell() {
     ${renderSidebar()}
     <div class="main">${renderTopbar()}<div class="content">${renderScreen()}</div></div>
     ${renderScannerModal()}
+    ${renderUnitPickerModal()}
     ${renderReceiptModal()}
     ${renderToastEl()}
   </div>`;
@@ -787,16 +791,15 @@ function renderCaisse() {
     const qty = stockAt(p, state.currentDepotId);
     const disabled = qty <= 0;
     const cat = catById[p.categoryId];
-    const packHtml = (!disabled && p.unitsPerPack > 1 && qty >= p.unitsPerPack)
-      ? `<div class="pos-unit-chip" data-action="addToCart" data-id="${p.id}" data-unit="pack" title="Ajouter un paquet de ${p.unitsPerPack}">Paquet (${p.unitsPerPack}) · ${fcfa(p.pricePerPack)}</div>` : '';
-    const cartonHtml = (!disabled && p.unitsPerCarton > 1 && qty >= p.unitsPerCarton)
-      ? `<div class="pos-unit-chip" data-action="addToCart" data-id="${p.id}" data-unit="carton" title="Ajouter un carton de ${p.unitsPerCarton}">Carton (${p.unitsPerCarton}) · ${fcfa(p.pricePerCarton)}</div>` : '';
-    return `<div class="pos-product-card${disabled ? ' disabled' : ''}"${disabled ? '' : ` data-action="addToCart" data-id="${p.id}" data-unit="detail"`}>
+    const hasPackaging = p.unitsPerPack > 1 || p.unitsPerCarton > 1;
+    const cardAction = disabled ? '' : hasPackaging
+      ? ` data-action="selectUnit" data-id="${p.id}"`
+      : ` data-action="addToCart" data-id="${p.id}" data-unit="detail"`;
+    return `<div class="pos-product-card${disabled ? ' disabled' : ''}"${cardAction}>
       <div class="pos-product-dot" style="background:${cat ? cat.color : '#888'}"></div>
       <div class="pos-product-name">${esc(p.name)}</div>
       <div class="pos-product-stock">${disabled ? 'Rupture de stock' : qty + ' en stock'}</div>
-      <div class="pos-product-price">${fcfa(p.price)}</div>
-      ${(packHtml || cartonHtml) ? `<div class="pos-unit-chips">${packHtml}${cartonHtml}</div>` : ''}
+      <div class="pos-product-price">${fcfa(p.price)}${hasPackaging ? '<span class="pos-packaging-hint">Détail/Paquet/Carton</span>' : ''}</div>
     </div>`;
   }).join('');
 
@@ -1310,6 +1313,27 @@ function renderAccount() {
   </div>`;
 }
 
+function renderUnitPickerModal() {
+  if (!state.showUnitPicker) return '';
+  const p = state.products.find((pp) => pp.id === state.unitPickerProductId);
+  if (!p) return '';
+  const available = stockAt(p, state.currentDepotId);
+  const options = [{ unit: 'detail', label: 'Détail', sub: '1 unité', price: p.price, ok: available >= 1 }];
+  if (p.unitsPerPack > 1) options.push({ unit: 'pack', label: 'Paquet', sub: `${p.unitsPerPack} unités`, price: p.pricePerPack, ok: available >= p.unitsPerPack });
+  if (p.unitsPerCarton > 1) options.push({ unit: 'carton', label: 'Carton', sub: `${p.unitsPerCarton} unités`, price: p.pricePerCarton, ok: available >= p.unitsPerCarton });
+  const optionsHtml = options.map((o) => `
+    <div class="unit-option${o.ok ? '' : ' disabled'}"${o.ok ? ` data-action="addToCart" data-id="${p.id}" data-unit="${o.unit}"` : ''}>
+      <div><div class="unit-option-label">${o.label}</div><div class="unit-option-sub">${o.ok ? o.sub : 'Stock insuffisant'}</div></div>
+      <div class="unit-option-price">${fcfa(o.price)}</div>
+    </div>`).join('');
+  return `<div class="modal-overlay">
+    <div class="modal-card">
+      <div class="modal-header"><div class="modal-title">${esc(p.name)}</div><div class="modal-close" data-action="closeUnitPicker">×</div></div>
+      <div class="modal-body">${optionsHtml}</div>
+    </div>
+  </div>`;
+}
+
 function renderScannerModal() {
   if (!state.showScanner) return '';
   const errorHtml = state.scanError ? `<div class="pos-error" style="text-align:center;margin-top:8px">${esc(state.scanError)}</div>` : '';
@@ -1388,6 +1412,8 @@ const Actions = {
   setPosCatAll: () => { state.posCategory = 'all'; rerender(); },
   setPosCategory: (ds) => { state.posCategory = ds.id; rerender(); },
   addToCart: (ds) => addToCart(ds.id, ds.unit),
+  selectUnit: (ds) => { state.showUnitPicker = true; state.unitPickerProductId = ds.id; rerender(); },
+  closeUnitPicker: () => { state.showUnitPicker = false; state.unitPickerProductId = null; rerender(); },
   cartMinus: (ds) => changeCartQty(ds.id, ds.unit, -1),
   cartPlus: (ds) => changeCartQty(ds.id, ds.unit, 1),
   cartRemove: (ds) => removeFromCart(ds.id, ds.unit),
