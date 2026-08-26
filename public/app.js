@@ -745,7 +745,7 @@ function renderSidebar() {
     return `<div class="nav-item${active ? ' active' : ''}" data-action="nav" data-screen="${n.key}">${n.icon}<span>${n.label}</span></div>`;
   }).join('');
   return `<div class="sidebar">
-    <div class="sidebar-brand"><div class="sidebar-logo">N</div><div><div class="sidebar-brand-name">NassuaGroup</div><div class="sidebar-brand-sub">Supermarché de boissons</div></div></div>
+    <div class="sidebar-brand"><div class="sidebar-logo">N</div><div><div class="sidebar-brand-name">NassuaGroup</div><div class="sidebar-brand-sub">Gestionnaire Magasin</div></div></div>
     <div class="sidebar-nav">${navHtml}</div>
     ${renderDepotSwitcher()}
     <div class="sidebar-footer">
@@ -1457,7 +1457,7 @@ function renderReceiptModal() {
       <div class="modal-header no-print"><div class="modal-title">Reçu de vente</div><div class="modal-close" data-action="closeReceipt">×</div></div>
       <div class="receipt-body">
         <div id="receipt-print">
-          <div class="receipt-brand"><div class="receipt-logo">N</div><div class="receipt-brand-name">NassuaGroup</div><div class="receipt-brand-sub">Supermarché de boissons</div></div>
+          <div class="receipt-brand"><div class="receipt-logo">N</div><div class="receipt-brand-name">NassuaGroup</div><div class="receipt-brand-sub">Gestionnaire Magasin</div></div>
           <div class="receipt-meta">
             <div class="receipt-meta-row"><span>Reçu</span><span>#${esc(r.id.slice(-6).toUpperCase())}</span></div>
             <div class="receipt-meta-row"><span>Date</span><span>${esc(dateLabel)} — ${esc(timeLabel)}</span></div>
