@@ -22,6 +22,7 @@ const ICON_CREDIT = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none"
 const ICON_EXPENSE = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="6" width="20" height="12" rx="2"></rect><circle cx="12" cy="12" r="3"></circle><path d="M6 9v.01M18 15v.01"></path></svg>';
 const ICON_FACTURATION = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 2.5h8l4 4v14.5a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V3.5a1 1 0 0 1 1-1z"></path><path d="M14 2.5V6.5h4"></path><path d="M7.5 12h5M7.5 15h5M7.5 18h3"></path></svg>';
 const ICON_EXTERNAL = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3"><path d="M9 5H5a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-4"></path><path d="M15 3h6v6"></path><path d="M10 14 21 3"></path></svg>';
+const ICON_ETABLISSEMENT = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 21V9l8-5 8 5v12"></path><path d="M9 21v-6h6v6"></path><path d="M9 12h.01M15 12h.01M9 8h.01M15 8h.01"></path></svg>';
 
 const FNE_URL = 'https://fne.dgi.gouv.ci';
 
@@ -51,6 +52,7 @@ const NAV_ITEMS = [
   { key: 'facturation', label: 'Facturation', icon: ICON_FACTURATION, managerOnly: false, external: FNE_URL },
   { key: 'rapports', label: 'Rapports', icon: ICON_RAPPORTS, managerOnly: true },
   { key: 'employes', label: 'Employés', icon: ICON_EMP, managerOnly: true },
+  { key: 'etablissement', label: 'Établissement', icon: ICON_ETABLISSEMENT, managerOnly: true },
   { key: 'account', label: 'Mon compte', icon: ICON_ACCOUNT, managerOnly: false },
 ];
 
@@ -66,6 +68,7 @@ const TITLES = {
   expenses: ['Dépenses', 'Suivi des sorties de caisse'],
   rapports: ['Rapports', 'Performance commerciale'],
   employes: ['Employés', 'Équipe et accès'],
+  etablissement: ['Établissement', "Informations et logo de l'entreprise (affichés sur le ticket de caisse)"],
   account: ['Mon compte', 'Sécurité de votre compte'],
 };
 
@@ -95,6 +98,7 @@ const state = {
   creditFilter: 'open', showCreditPayment: false, cpSaleId: '', cpAmount: '',
   showAddExpense: false, exCategory: EXPENSE_CATEGORIES[0], exCustomCategory: '', exAmount: '', exDepotId: '', exNote: '',
   pwCurrent: '', pwNew: '', pwConfirm: '', pwError: null, pwSuccess: null,
+  estCompanyName: '', estAddress: '', estPhone: '', estEmail: '', estTaxId: '', estLogo: '',
   toast: null,
   showReceipt: false, lastReceipt: null,
 };
@@ -193,6 +197,10 @@ async function loadAppState() {
     state.depots = data.depots || [];
     state.categories = data.categories; state.suppliers = data.suppliers; state.products = data.products;
     state.clients = data.clients; state.employees = data.employees; state.sales = data.sales; state.expenses = data.expenses || [];
+    const settings = data.settings || {};
+    state.estCompanyName = settings.companyName || ''; state.estAddress = settings.address || '';
+    state.estPhone = settings.phone || ''; state.estEmail = settings.email || '';
+    state.estTaxId = settings.taxId || ''; state.estLogo = settings.logo || '';
     state.npCategoryId = data.categories[0] ? data.categories[0].id : '';
     state.npSupplierId = data.suppliers[0] ? data.suppliers[0].id : '';
     state.npDepotId = state.depots[0] ? state.depots[0].id : '';
@@ -582,6 +590,33 @@ async function addExpense() {
   } catch (e) { flashToast(e.message); }
 }
 
+// ---------- Établissement ----------
+// Kept comfortably under the server's ~700 000-char logo cap (base64 inflates
+// raw bytes by ~4/3) so an oversized image gets rejected here, before an
+// upload, rather than a 400 from the server after the read.
+const MAX_LOGO_FILE_BYTES = 500 * 1024;
+function handleLogoFile(file) {
+  if (!file) return;
+  if (!file.type.startsWith('image/')) { flashToast('Le logo doit être une image'); return; }
+  if (file.size > MAX_LOGO_FILE_BYTES) { flashToast('Image trop volumineuse (max 500 Ko)'); return; }
+  const reader = new FileReader();
+  reader.onload = () => { state.estLogo = reader.result; rerender(); };
+  reader.readAsDataURL(file);
+}
+async function saveSettings() {
+  try {
+    const settings = await api('PATCH', '/api/settings', {
+      companyName: state.estCompanyName, address: state.estAddress, phone: state.estPhone,
+      email: state.estEmail, taxId: state.estTaxId, logo: state.estLogo,
+    });
+    state.estCompanyName = settings.companyName; state.estAddress = settings.address;
+    state.estPhone = settings.phone; state.estEmail = settings.email;
+    state.estTaxId = settings.taxId; state.estLogo = settings.logo;
+    flashToast('Établissement mis à jour');
+    rerender();
+  } catch (e) { flashToast(e.message); }
+}
+
 // ---------- Depots ----------
 async function addDepot() {
   if (!state.ndName.trim()) return;
@@ -807,6 +842,7 @@ function renderScreen() {
     case 'expenses': return renderExpenses();
     case 'rapports': return renderRapports();
     case 'employes': return renderEmployes();
+    case 'etablissement': return renderEtablissement();
     case 'account': return renderAccount();
     default: return renderDashboard();
   }
@@ -1380,6 +1416,35 @@ function renderEmployes() {
   </div>`;
 }
 
+function renderEtablissement() {
+  const logoPreview = state.estLogo
+    ? `<div class="est-logo-preview"><img src="${state.estLogo}" alt="Logo" /></div>` : '';
+  const removeBtn = state.estLogo
+    ? `<span style="cursor:pointer;color:var(--danger);font-size:12.5px;font-weight:600" data-action="removeLogo">Supprimer le logo</span>` : '';
+  return `<div style="max-width:480px">
+    <div class="card">
+      <div class="card-title">Informations de l'entreprise</div>
+      <div style="font-size:12.5px;color:var(--muted);margin-bottom:14px">Ces informations et ce logo apparaissent sur le ticket de caisse imprimable.</div>
+      <div style="display:flex;flex-direction:column;gap:10px">
+        <input id="field-estCompanyName" class="field-lg" type="text" placeholder="Nom de l'entreprise" value="${esc(state.estCompanyName)}" data-bind="estCompanyName" />
+        <input id="field-estAddress" class="field-lg" type="text" placeholder="Adresse" value="${esc(state.estAddress)}" data-bind="estAddress" />
+        <input id="field-estPhone" class="field-lg" type="text" placeholder="Téléphone" value="${esc(state.estPhone)}" data-bind="estPhone" />
+        <input id="field-estEmail" class="field-lg" type="email" placeholder="Email" value="${esc(state.estEmail)}" data-bind="estEmail" />
+        <input id="field-estTaxId" class="field-lg" type="text" placeholder="Identifiant fiscal (RCCM / IFU)" value="${esc(state.estTaxId)}" data-bind="estTaxId" />
+        <div>
+          <div style="font-size:12px;color:var(--muted);margin-bottom:6px">Logo</div>
+          ${logoPreview}
+          <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+            <input id="field-estLogoFile" type="file" accept="image/*" data-bind="estLogoFile" />
+            ${removeBtn}
+          </div>
+        </div>
+        <div class="save-btn" style="padding:11px;justify-content:center" data-action="saveSettings">Enregistrer</div>
+      </div>
+    </div>
+  </div>`;
+}
+
 function renderAccount() {
   const errorHtml = state.pwError ? `<div class="pos-error" style="margin-bottom:2px">${esc(state.pwError)}</div>` : '';
   const successHtml = state.pwSuccess ? `<div style="color:var(--green);font-size:12.5px;font-weight:600;margin-bottom:2px">${esc(state.pwSuccess)}</div>` : '';
@@ -1452,12 +1517,21 @@ function renderReceiptModal() {
   </div>`;
   }).join('');
   const clientRow = r.clientName ? `<div class="receipt-meta-row"><span>Client</span><span>${esc(r.clientName)}</span></div>` : '';
+  // Falls back to the platform's own "NassuaGroup" brand block when the shop
+  // hasn't filled in its Établissement info yet — see renderEtablissement().
+  const brandName = state.estCompanyName || 'NassuaGroup';
+  const brandLogo = state.estLogo ? `<img src="${state.estLogo}" alt="" />` : 'N';
+  const contactLine = [state.estAddress, state.estPhone].filter(Boolean).join(' · ');
+  const taxLine = state.estTaxId ? `RCCM/IFU : ${state.estTaxId}` : '';
+  const brandSubHtml = state.estCompanyName
+    ? `${contactLine ? `<div class="receipt-brand-sub">${esc(contactLine)}</div>` : ''}${taxLine ? `<div class="receipt-brand-sub">${esc(taxLine)}</div>` : ''}`
+    : `<div class="receipt-brand-sub">Gestionnaire Magasin</div>`;
   return `<div class="modal-overlay no-print">
     <div class="modal-card receipt-modal">
       <div class="modal-header no-print"><div class="modal-title">Reçu de vente</div><div class="modal-close" data-action="closeReceipt">×</div></div>
       <div class="receipt-body">
         <div id="receipt-print">
-          <div class="receipt-brand"><div class="receipt-logo">N</div><div class="receipt-brand-name">NassuaGroup</div><div class="receipt-brand-sub">Gestionnaire Magasin</div></div>
+          <div class="receipt-brand"><div class="receipt-logo">${brandLogo}</div><div class="receipt-brand-name">${esc(brandName)}</div>${brandSubHtml}</div>
           <div class="receipt-meta">
             <div class="receipt-meta-row"><span>Reçu</span><span>#${esc(r.id.slice(-6).toUpperCase())}</span></div>
             <div class="receipt-meta-row"><span>Date</span><span>${esc(dateLabel)} — ${esc(timeLabel)}</span></div>
@@ -1566,6 +1640,8 @@ const Actions = {
   closeReceipt: () => { state.showReceipt = false; rerender(); },
   printReceipt: () => window.print(),
   submitChangePassword: () => changePassword(),
+  saveSettings: () => saveSettings(),
+  removeLogo: () => { state.estLogo = ''; rerender(); },
 };
 
 function onClick(e) {
@@ -1589,6 +1665,10 @@ function onInput(e) {
 const DEPOT_VIEW_FILTER_BINDS = new Set(['dashDepotFilter', 'stockDepotFilter', 'repDepotFilter', 'expenseDepotFilter']);
 function onChange(e) {
   const el = e.target;
+  if (el.type === 'file' && el.dataset && el.dataset.bind === 'estLogoFile') {
+    handleLogoFile(el.files && el.files[0]);
+    return;
+  }
   if (!el.dataset || !el.dataset.bind || el.tagName !== 'SELECT') return;
   const bind = el.dataset.bind;
   state[bind] = el.value;

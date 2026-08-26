@@ -187,7 +187,7 @@ function buildSeed() {
       recordedBy: e.cashier,
     };
   });
-  return { depots, categories, suppliers, products, clients, employees, sales, expenses };
+  return { depots, categories, suppliers, products, clients, employees, sales, expenses, settings: defaultSettings() };
 }
 
 // Upgrades a pre-multi-dépôt tenant db (flat product.stock, no depots) in
@@ -241,6 +241,7 @@ function migrateTenantData(data) {
       changed = true;
     }
   });
+  if (!data.settings) { data.settings = defaultSettings(); changed = true; }
   return changed;
 }
 
@@ -300,6 +301,17 @@ loadAllTenants();
 function uid(prefix) {
   return prefix + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
 }
+// Establishment info shown on printed receipts (company name/address/phone/
+// email/tax id + logo) — per-tenant, blank by default rather than fabricated,
+// same as every other per-tenant field.
+function defaultSettings(companyName) {
+  return { companyName: companyName || '', address: '', phone: '', email: '', taxId: '', logo: '' };
+}
+// A data: URI logo is stored inline in the tenant's JSON (no file storage in
+// this zero-dependency app) — capped well under readJSONBody's 1MB request
+// cap so an oversized upload gets a clean 400 instead of the request being
+// silently destroyed mid-read.
+const MAX_LOGO_LENGTH = 700000;
 function sendJSON(res, status, data) {
   const body = JSON.stringify(data);
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -460,6 +472,7 @@ async function handleApi(req, res, pathname) {
       depots: [{ id: 'd1', name: 'Dépôt principal', address: '' }],
       categories: [], suppliers: [], products: [], clients: [],
       employees: [managerEmployee], sales: [], expenses: [],
+      settings: defaultSettings(shopName),
     };
     tenants.set(tenantId, newDb);
     tenantsMeta.push({ id: tenantId, name: shopName, createdAt: new Date().toISOString() });
@@ -499,6 +512,7 @@ async function handleApi(req, res, pathname) {
     pathname === '/api/employees' && method === 'POST',
     pathname === '/api/stock-transfer' && method === 'POST',
     pathname === '/api/expenses' && method === 'POST',
+    pathname === '/api/settings' && method === 'PATCH',
     /^\/api\/employees\/[^/]+(\/toggle)?$/.test(pathname) && method !== 'GET',
     /^\/api\/products\/[^/]+$/.test(pathname) && method === 'DELETE',
   ].some(Boolean);
@@ -858,6 +872,23 @@ async function handleApi(req, res, pathname) {
     db.expenses.unshift(expense);
     saveTenant(session.tenantId);
     return sendJSON(res, 201, expense);
+  }
+
+  if (pathname === '/api/settings' && method === 'PATCH') {
+    const body = await readJSONBody(req);
+    if (typeof body.logo === 'string' && body.logo.length > MAX_LOGO_LENGTH) {
+      return sendJSON(res, 400, { error: 'Logo trop volumineux (taille maximale ~500 Ko)' });
+    }
+    db.settings = {
+      companyName: (body.companyName || '').trim(),
+      address: (body.address || '').trim(),
+      phone: (body.phone || '').trim(),
+      email: (body.email || '').trim(),
+      taxId: (body.taxId || '').trim(),
+      logo: typeof body.logo === 'string' ? body.logo : (db.settings.logo || ''),
+    };
+    saveTenant(session.tenantId);
+    return sendJSON(res, 200, db.settings);
   }
 
   return sendJSON(res, 404, { error: 'Route inconnue' });
