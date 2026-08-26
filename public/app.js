@@ -1646,60 +1646,104 @@ function renderInvoiceHtml(r) {
   </div>`;
 }
 
-// Plain-text version of the A4 invoice, meant to be pasted into the DGI's
-// own FNE portal (fne.dgi.gouv.ci) — this app has no FNE API integration
-// (no DGI credentials, no verified API contract), so "migrating" a facture
-// to FNE means giving the user everything they need to re-enter it there
-// by hand, not submitting it electronically. Mirrors renderInvoiceHtml's
-// HT/TVA math exactly so the two never disagree.
-function buildInvoiceText(r) {
+// Shared HT/TVA math + field prep for every FNE copy helper below, so the
+// full-text copy and the per-section copies can never disagree with each
+// other or with renderInvoiceHtml (this app has no FNE API integration —
+// no DGI credentials, no verified API contract — so all of this is about
+// making manual re-entry into the DGI's own portal fast, not submitting
+// electronically).
+function computeInvoiceCore(r) {
   const dateObj = new Date(r.date);
   const dateTimeLabel = `${dateObj.toLocaleDateString('fr-FR')} ${dateObj.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })}`;
   const vatRate = Number(state.estVatRate) || 0;
   const client = r.clientId ? state.clients.find((c) => c.id === r.clientId) : null;
-
   let totalHT = 0, totalVAT = 0;
-  const lines = r.items.map((it) => {
+  const items = r.items.map((it) => {
     const product = state.products.find((p) => p.id === it.productId);
     const ref = (product && product.barcode) || it.productId;
     const unitLabel = it.unit === 'pack' ? 'Paquet' : it.unit === 'carton' ? 'Carton' : 'Détail';
     const ht = it.lineTotal / (1 + vatRate / 100);
     totalHT += ht; totalVAT += it.lineTotal - ht;
-    return `- ${it.name} | Réf ${ref} | Qté ${it.qty} (${unitLabel}) | P.U HT ${fcfa(ht / it.qty)} | Montant HT ${fcfa(ht)}`;
+    return { name: it.name, ref, unitLabel, qty: it.qty, htUnit: ht / it.qty, ht };
   });
-
-  // null marks an omitted optional field (dropped below); '' is a
-  // deliberate blank spacer line (kept) — kept distinct so filtering out
-  // omitted fields never eats an intentional blank line too.
+  return { dateTimeLabel, vatRate, client, items, totalHT, totalVAT };
+}
+// null marks an omitted optional field (dropped by the caller's filter);
+// '' is a deliberate blank spacer line (kept) — kept distinct so dropping
+// omitted fields never eats an intentional blank line too.
+function buildFNEIdentityText(core) {
   return [
-    'FACTURE',
-    '',
     `Établissement : ${state.estCompanyName || ''}`,
     state.estNcc ? `NCC : ${state.estNcc}` : null,
     state.estTaxRegime ? `Régime d'imposition : ${state.estTaxRegime}` : null,
     state.estTaxCenter ? `Centre des impôts : ${state.estTaxCenter}` : null,
     state.estTaxId ? `RCCM : ${state.estTaxId}` : null,
-    state.estAddress ? `Adresse : ${state.estAddress}` : null,
-    state.estPhone ? `Téléphone : ${state.estPhone}` : null,
-    state.estEmail ? `Email : ${state.estEmail}` : null,
     state.estBankDetails ? `Références bancaires : ${state.estBankDetails}` : null,
-    '',
-    `Client : ${r.clientName || 'Client de passage'}`,
-    client && client.phone ? `Téléphone client : ${client.phone}` : null,
-    '',
-    `Vendeur : ${r.cashier}`,
-    `Point de vente : ${r.depotName || ''}`,
-    `Date et heure : ${dateTimeLabel}`,
+  ].filter((line) => line !== null).join('\n');
+}
+function buildFNEPartiesText(r, core) {
+  return [
+    state.estAddress ? `Adresse : ${state.estAddress}` : null,
+    state.estPhone ? `N° Tel : ${state.estPhone}` : null,
+    state.estEmail ? `Mail : ${state.estEmail}` : null,
+    `Nom du vendeur : ${r.cashier}`,
+    `Nom de PDV : ${r.depotName || ''}`,
+    `Date et heure : ${core.dateTimeLabel}`,
     `Mode de paiement : ${r.paymentMethod}`,
     '',
-    'Articles :',
-    ...lines,
-    '',
-    `TOTAL HT : ${fcfa(totalHT)}`,
-    `TVA (${vatRate}%) : ${fcfa(totalVAT)}`,
-    `TOTAL TTC : ${fcfa(totalHT + totalVAT)}`,
-    `TOTAL A PAYER : ${fcfa(r.total)}`,
+    `Client — Nom : ${r.clientName || 'Client de passage'}`,
+    core.client && core.client.phone ? `Client — Téléphone : ${core.client.phone}` : null,
   ].filter((line) => line !== null).join('\n');
+}
+// Tab-separated so a single paste can fill a whole grid row at once in any
+// form/spreadsheet-like widget that supports it, in the exact column order
+// shown on the printed facture (Réf, Désignation, P.U HT, Qté, Unité,
+// Taxes (%), Rem. (%), Montant HT).
+function buildFNEItemsTSV(core) {
+  const header = ['Réf', 'Désignation', 'P.U HT', 'Qté', 'Unité', 'Taxes (%)', 'Rem. (%)', 'Montant HT'].join('\t');
+  const rows = core.items.map((it) =>
+    [it.ref, it.name, Math.round(it.htUnit), it.qty, it.unitLabel, core.vatRate, 0, Math.round(it.ht)].join('\t'));
+  return [header, ...rows].join('\n');
+}
+function buildFNETotalsText(r, core) {
+  return [
+    `TOTAL HT : ${fcfa(core.totalHT)}`,
+    `TVA (${core.vatRate}%) : ${fcfa(core.totalVAT)}`,
+    `TOTAL TTC : ${fcfa(core.totalHT + core.totalVAT)}`,
+    `TOTAL A PAYER : ${fcfa(r.total)}`,
+  ].join('\n');
+}
+function buildInvoiceText(r) {
+  const core = computeInvoiceCore(r);
+  return [
+    'FACTURE', '',
+    buildFNEIdentityText(core), '',
+    buildFNEPartiesText(r, core), '',
+    'Articles :',
+    ...core.items.map((it) => `- ${it.name} | Réf ${it.ref} | Qté ${it.qty} (${it.unitLabel}) | P.U HT ${fcfa(it.htUnit)} | Montant HT ${fcfa(it.ht)}`),
+    '',
+    buildFNETotalsText(r, core),
+  ].join('\n');
+}
+async function copyText(text, successMsg) {
+  try {
+    await navigator.clipboard.writeText(text);
+    flashToast(successMsg);
+  } catch (e) {
+    flashToast('Impossible de copier automatiquement — sélectionnez et copiez manuellement');
+  }
+}
+const FNE_SECTION_BUILDERS = {
+  identity: { build: (r, core) => buildFNEIdentityText(core), msg: 'Identité entreprise copiée (NCC, régime, centre des impôts, RCCM, RIB)' },
+  parties: { build: (r, core) => buildFNEPartiesText(r, core), msg: 'Établissement et client copiés' },
+  items: { build: (r, core) => buildFNEItemsTSV(core), msg: 'Articles copiés (collez dans le tableau FNE, une ligne complète à la fois)' },
+  totals: { build: (r, core) => buildFNETotalsText(r, core), msg: 'Totaux copiés (HT / TVA / TTC)' },
+};
+function copyFNESection(section) {
+  const r = state.lastReceipt;
+  const entry = FNE_SECTION_BUILDERS[section];
+  if (!r || !entry) return;
+  copyText(entry.build(r, computeInvoiceCore(r)), entry.msg);
 }
 async function sendToFNE() {
   const r = state.lastReceipt;
@@ -1727,6 +1771,15 @@ function renderReceiptModal() {
         </div>
       </div>
       <div class="receipt-body">${isInvoice ? renderInvoiceHtml(r) : renderTicketHtml(r)}</div>
+      ${isInvoice ? `<div class="no-print fne-copy-panel">
+        <div class="fne-copy-title">Aide à la saisie FNE — copiez juste le bloc qu'il vous faut pour le coller au bon endroit sur le portail</div>
+        <div class="fne-copy-chips">
+          <div class="fne-copy-chip" data-action="copyFNESection" data-section="identity">Identité entreprise</div>
+          <div class="fne-copy-chip" data-action="copyFNESection" data-section="parties">Établissement + Client</div>
+          <div class="fne-copy-chip" data-action="copyFNESection" data-section="items">Articles (tableau)</div>
+          <div class="fne-copy-chip" data-action="copyFNESection" data-section="totals">Totaux</div>
+        </div>
+      </div>` : ''}
       <div class="modal-footer no-print">
         <div class="modal-footer-btn secondary" data-action="closeReceipt">Fermer</div>
         ${isInvoice ? `<div class="modal-footer-btn secondary" data-action="sendToFNE" title="Copie les infos de la facture et ouvre le portail officiel fne.dgi.gouv.ci pour les y saisir">Migrer vers FNE</div>` : ''}
@@ -1821,6 +1874,7 @@ const Actions = {
   closeReceipt: () => { state.showReceipt = false; state.receiptView = 'ticket'; rerender(); },
   toggleReceiptView: () => { state.receiptView = state.receiptView === 'ticket' ? 'invoice' : 'ticket'; rerender(); },
   sendToFNE: () => sendToFNE(),
+  copyFNESection: (ds) => copyFNESection(ds.section),
   printReceipt: () => window.print(),
   submitChangePassword: () => changePassword(),
   saveSettings: () => saveSettings(),
