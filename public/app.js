@@ -696,7 +696,7 @@ function toggleEmployeeActive(id) {
 // ---------- Rendering ----------
 function renderLogin() {
   const brandHtml = `<div class="login-brand"><div class="login-logo">N</div><div class="login-title">NassuaGroup</div></div>
-    <div class="login-sub">Gestion de supermarché de boissons</div>`;
+    <div class="login-sub">Gestionnaire Magasin</div>`;
 
   if (!state.loginMode) {
     return `<div class="login-screen"><div class="login-card">
