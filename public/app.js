@@ -1849,7 +1849,14 @@ function renderReceiptModal() {
   if (!state.showReceipt || !state.lastReceipt) return '';
   const r = state.lastReceipt;
   const isInvoice = state.receiptView === 'invoice';
-  return `<div class="modal-overlay no-print">
+  // Deliberately NOT .no-print on this outer wrapper: it's an ancestor of
+  // #receipt-print/#invoice-print, and display:none on an ancestor can't be
+  // undone by visibility:visible on a descendant — that combination
+  // silently printed a fully blank page. The print stylesheet's
+  // `body * { visibility: hidden }` already hides this overlay's own
+  // background at print time; only the UI-chrome children (header, footer,
+  // FNE panels) need their own .no-print.
+  return `<div class="modal-overlay">
     <div class="modal-card receipt-modal${isInvoice ? ' invoice-mode' : ''}">
       <div class="modal-header no-print">
         <div class="modal-title">${isInvoice ? 'Facture (A4)' : 'Reçu de vente'}</div>

@@ -239,4 +239,10 @@ table.inv-totals td { padding: 5px 8px; border-top: 1px solid #ddd; }
   #receipt-print, #receipt-print *, #invoice-print, #invoice-print * { visibility: visible; }
   #receipt-print, #invoice-print { position: absolute; top: 0; left: 0; width: 100%; }
   .no-print { display: none !important; }
+  /* The modal chrome around #receipt-print/#invoice-print clips and caps
+     their on-screen size (overflow:hidden, fixed width, max-height) — none
+     of that should carry over once the print target escapes to fill the
+     page via position:absolute above, or the printout gets clipped to a
+     small on-screen box instead of the full A6/A4 page. */
+  .modal-card, .receipt-modal, .receipt-body { overflow: visible !important; max-height: none !important; width: auto !important; }
 }
