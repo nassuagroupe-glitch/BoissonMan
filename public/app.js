@@ -1646,6 +1646,73 @@ function renderInvoiceHtml(r) {
   </div>`;
 }
 
+// Plain-text version of the A4 invoice, meant to be pasted into the DGI's
+// own FNE portal (fne.dgi.gouv.ci) — this app has no FNE API integration
+// (no DGI credentials, no verified API contract), so "migrating" a facture
+// to FNE means giving the user everything they need to re-enter it there
+// by hand, not submitting it electronically. Mirrors renderInvoiceHtml's
+// HT/TVA math exactly so the two never disagree.
+function buildInvoiceText(r) {
+  const dateObj = new Date(r.date);
+  const dateTimeLabel = `${dateObj.toLocaleDateString('fr-FR')} ${dateObj.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })}`;
+  const vatRate = Number(state.estVatRate) || 0;
+  const client = r.clientId ? state.clients.find((c) => c.id === r.clientId) : null;
+
+  let totalHT = 0, totalVAT = 0;
+  const lines = r.items.map((it) => {
+    const product = state.products.find((p) => p.id === it.productId);
+    const ref = (product && product.barcode) || it.productId;
+    const unitLabel = it.unit === 'pack' ? 'Paquet' : it.unit === 'carton' ? 'Carton' : 'Détail';
+    const ht = it.lineTotal / (1 + vatRate / 100);
+    totalHT += ht; totalVAT += it.lineTotal - ht;
+    return `- ${it.name} | Réf ${ref} | Qté ${it.qty} (${unitLabel}) | P.U HT ${fcfa(ht / it.qty)} | Montant HT ${fcfa(ht)}`;
+  });
+
+  // null marks an omitted optional field (dropped below); '' is a
+  // deliberate blank spacer line (kept) — kept distinct so filtering out
+  // omitted fields never eats an intentional blank line too.
+  return [
+    'FACTURE',
+    '',
+    `Établissement : ${state.estCompanyName || ''}`,
+    state.estNcc ? `NCC : ${state.estNcc}` : null,
+    state.estTaxRegime ? `Régime d'imposition : ${state.estTaxRegime}` : null,
+    state.estTaxCenter ? `Centre des impôts : ${state.estTaxCenter}` : null,
+    state.estTaxId ? `RCCM : ${state.estTaxId}` : null,
+    state.estAddress ? `Adresse : ${state.estAddress}` : null,
+    state.estPhone ? `Téléphone : ${state.estPhone}` : null,
+    state.estEmail ? `Email : ${state.estEmail}` : null,
+    state.estBankDetails ? `Références bancaires : ${state.estBankDetails}` : null,
+    '',
+    `Client : ${r.clientName || 'Client de passage'}`,
+    client && client.phone ? `Téléphone client : ${client.phone}` : null,
+    '',
+    `Vendeur : ${r.cashier}`,
+    `Point de vente : ${r.depotName || ''}`,
+    `Date et heure : ${dateTimeLabel}`,
+    `Mode de paiement : ${r.paymentMethod}`,
+    '',
+    'Articles :',
+    ...lines,
+    '',
+    `TOTAL HT : ${fcfa(totalHT)}`,
+    `TVA (${vatRate}%) : ${fcfa(totalVAT)}`,
+    `TOTAL TTC : ${fcfa(totalHT + totalVAT)}`,
+    `TOTAL A PAYER : ${fcfa(r.total)}`,
+  ].filter((line) => line !== null).join('\n');
+}
+async function sendToFNE() {
+  const r = state.lastReceipt;
+  if (!r) return;
+  try {
+    await navigator.clipboard.writeText(buildInvoiceText(r));
+    flashToast('Détails de la facture copiés — collez-les dans le portail FNE');
+  } catch (e) {
+    flashToast("Impossible de copier automatiquement — ouvrez le portail et saisissez les infos depuis la facture");
+  }
+  window.open(FNE_URL, '_blank', 'noopener');
+}
+
 function renderReceiptModal() {
   if (!state.showReceipt || !state.lastReceipt) return '';
   const r = state.lastReceipt;
@@ -1662,6 +1729,7 @@ function renderReceiptModal() {
       <div class="receipt-body">${isInvoice ? renderInvoiceHtml(r) : renderTicketHtml(r)}</div>
       <div class="modal-footer no-print">
         <div class="modal-footer-btn secondary" data-action="closeReceipt">Fermer</div>
+        ${isInvoice ? `<div class="modal-footer-btn secondary" data-action="sendToFNE" title="Copie les infos de la facture et ouvre le portail officiel fne.dgi.gouv.ci pour les y saisir">Migrer vers FNE</div>` : ''}
         <div class="modal-footer-btn primary" data-action="printReceipt">${isInvoice ? 'Imprimer (A4)' : 'Imprimer (A6)'}</div>
       </div>
     </div>
@@ -1752,6 +1820,7 @@ const Actions = {
   toggleEmployeeActive: (ds) => toggleEmployeeActive(ds.id),
   closeReceipt: () => { state.showReceipt = false; state.receiptView = 'ticket'; rerender(); },
   toggleReceiptView: () => { state.receiptView = state.receiptView === 'ticket' ? 'invoice' : 'ticket'; rerender(); },
+  sendToFNE: () => sendToFNE(),
   printReceipt: () => window.print(),
   submitChangePassword: () => changePassword(),
   saveSettings: () => saveSettings(),
