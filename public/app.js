@@ -85,6 +85,7 @@ const state = {
   depots: [], categories: [], suppliers: [], clients: [], employees: [], products: [], sales: [], expenses: [],
   currentDepotId: '', // depot the signed-in user is currently operating / selling from
   stockDepotFilter: '', dashDepotFilter: '', repDepotFilter: '', expenseDepotFilter: '', // 'all' or a depot id
+  repDateMode: 'all', repDateFrom: '', repDateTo: '', // 'all'|'day'|'week'|'month'|'custom' — Rapports date filter
   cart: [], posCategory: 'all', posSearch: '', posClientId: '', paymentMethod: 'Espèces', posAdvance: '',
   showUnitPicker: false, unitPickerProductId: null,
   scanInput: '', showScanner: false, scanError: null, scanMode: 'sell', scanDevices: [], scanDeviceId: '',
@@ -164,6 +165,37 @@ function computeWeekBars(sales) {
 // Sales scoped to a depot filter value ('all' or a depot id).
 function salesForDepot(filterId) {
   return filterId === 'all' ? state.sales : state.sales.filter((sa) => sa.depotId === filterId);
+}
+// Resolves Rapports' date filter (state.repDateMode) into a concrete
+// [start, end] range, or null for 'all' (no filtering). 'day'/'week'/'month'
+// are always relative to *now* — a week starts Monday, a month starts on
+// the 1st — never a stored anchor date, so the same option always means
+// "this week"/"this month" whenever it's picked.
+function reportDateRange() {
+  const mode = state.repDateMode || 'all';
+  const now = new Date();
+  if (mode === 'day') {
+    const start = new Date(now); start.setHours(0, 0, 0, 0);
+    return { start, end: now };
+  }
+  if (mode === 'week') {
+    const start = new Date(now); start.setHours(0, 0, 0, 0);
+    start.setDate(start.getDate() - ((start.getDay() + 6) % 7)); // back to Monday
+    return { start, end: now };
+  }
+  if (mode === 'month') {
+    return { start: new Date(now.getFullYear(), now.getMonth(), 1), end: now };
+  }
+  if (mode === 'custom') {
+    if (!state.repDateFrom || !state.repDateTo) return null;
+    return { start: new Date(state.repDateFrom + 'T00:00:00'), end: new Date(state.repDateTo + 'T23:59:59.999') };
+  }
+  return null;
+}
+function inDateRange(iso, range) {
+  if (!range) return true;
+  const t = new Date(iso).getTime();
+  return t >= range.start.getTime() && t <= range.end.getTime();
 }
 
 // ---------- API ----------
@@ -1365,15 +1397,33 @@ function renderExpenses() {
   </div>`;
 }
 
+function renderReportDateFilter() {
+  const mode = state.repDateMode || 'all';
+  const options = [
+    ['all', "Tout l'historique"], ['day', "Aujourd'hui"], ['week', 'Cette semaine'],
+    ['month', 'Ce mois-ci'], ['custom', 'Période personnalisée'],
+  ].map(([v, label]) => `<option value="${v}"${mode === v ? ' selected' : ''}>${esc(label)}</option>`).join('');
+  const customInputs = mode === 'custom' ? `
+    <input id="field-repDateFrom" class="field" type="date" value="${esc(state.repDateFrom)}" data-bind="repDateFrom" />
+    <span style="color:var(--muted);font-size:12px">→</span>
+    <input id="field-repDateTo" class="field" type="date" value="${esc(state.repDateTo)}" data-bind="repDateTo" />` : '';
+  return `<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+    <select id="field-repDateMode" class="field" data-bind="repDateMode">${options}</select>
+    ${customInputs}
+  </div>`;
+}
+
 function renderRapports() {
   const filterId = state.repDepotFilter || 'all';
-  const relevantSales = salesForDepot(filterId);
+  const dateRange = reportDateRange();
+  const relevantSales = salesForDepot(filterId).filter((sa) => inDateRange(sa.date, dateRange));
   const totalRevenue = relevantSales.reduce((a, sa) => a + sa.total, 0);
   const salesCount = relevantSales.length;
   const avgBasket = salesCount ? totalRevenue / salesCount : 0;
   const unitsSold = relevantSales.reduce((a, sa) => a + sa.itemCount, 0);
 
-  const relevantExpenses = filterId === 'all' ? state.expenses : state.expenses.filter((e) => e.depotId === filterId);
+  const relevantExpenses = (filterId === 'all' ? state.expenses : state.expenses.filter((e) => e.depotId === filterId))
+    .filter((e) => inDateRange(e.date, dateRange));
   const totalExpenses = relevantExpenses.reduce((a, e) => a + e.amount, 0);
   const creditOutstanding = relevantSales.filter((sa) => sa.paymentMethod === 'Crédit').reduce((a, sa) => a + (sa.creditRemaining || 0), 0);
   // Cash actually collected: non-credit sales count in full (assumed paid on
@@ -1385,10 +1435,11 @@ function renderRapports() {
 
   // Revenue-by-category and top-products are derived from the itemised
   // history of real checkouts (sale.items) rather than the lifetime
-  // product.sold counter, so they can be filtered by depot correctly —
-  // they always cover every depot's full history, not just this filter.
+  // product.sold counter. They stay intentionally depot-unfiltered (always
+  // every dépôt) — but do respect the date filter, same as everything else
+  // on this screen — see the caption below the KPIs.
   const soldMap = {}, revMap = {};
-  state.sales.forEach((sa) => (sa.items || []).forEach((it) => {
+  state.sales.filter((sa) => inDateRange(sa.date, dateRange)).forEach((sa) => (sa.items || []).forEach((it) => {
     soldMap[it.productId] = (soldMap[it.productId] || 0) + (it.baseQty != null ? it.baseQty : it.qty);
     revMap[it.productId] = (revMap[it.productId] || 0) + it.lineTotal;
   }));
@@ -1407,7 +1458,10 @@ function renderRapports() {
       `<div class="top-product-row"><div style="font-size:13px;font-weight:600">${i + 1}. ${esc(x.p.name)}</div><div style="font-size:12.5px;color:var(--muted)">${x.sold} unités</div></div>`).join('');
 
   return `<div>
-    <div style="display:flex;justify-content:flex-end;margin-bottom:16px">${renderDepotFilter('repDepotFilter', true)}</div>
+    <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;margin-bottom:16px">
+      ${renderReportDateFilter()}
+      ${renderDepotFilter('repDepotFilter', true)}
+    </div>
     <div class="kpi-grid" style="margin-bottom:6px">
       <div class="card"><div class="kpi-label">REVENU TOTAL</div><div class="kpi-value" style="font-size:24px;color:var(--green)">${fcfa(totalRevenue)}</div></div>
       <div class="card"><div class="kpi-label">NOMBRE DE VENTES</div><div class="kpi-value" style="font-size:24px">${salesCount}</div></div>
@@ -1419,7 +1473,7 @@ function renderRapports() {
       <div class="card"><div class="kpi-label">DÉPENSES</div><div class="kpi-value" style="font-size:24px;color:var(--danger)">${fcfa(totalExpenses)}</div></div>
       <div class="card"><div class="kpi-label">CRÉDIT EN COURS</div><div class="kpi-value" style="font-size:24px;color:var(--danger)">${fcfa(creditOutstanding)}</div></div>
     </div>
-    <div style="font-size:11.5px;color:var(--muted);margin-bottom:14px">Le solde de caisse compte les ventes payées immédiatement en totalité, et les ventes à crédit seulement pour l'avance et les versements déjà reçus (pas le solde restant) — moins les dépenses. Le revenu par catégorie et le classement produits ci-dessous couvrent l'historique complet de toutes les boutiques.</div>
+    <div style="font-size:11.5px;color:var(--muted);margin-bottom:14px">Le solde de caisse compte les ventes payées immédiatement en totalité, et les ventes à crédit seulement pour l'avance et les versements déjà reçus (pas le solde restant) — moins les dépenses. Le revenu par catégorie et le classement produits ci-dessous couvrent tous les dépôts (pas seulement celui sélectionné), mais respectent la période choisie.</div>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
       <div class="card"><div class="card-title">Revenu par catégorie</div><div style="display:flex;flex-direction:column;gap:12px">${catRows}</div></div>
       <div class="card"><div class="card-title">Top 5 produits</div><div style="display:flex;flex-direction:column;gap:10px">${topProducts || '<div style="font-size:13px;color:var(--muted)">Aucune vente enregistrée pour le moment.</div>'}</div></div>
@@ -2005,7 +2059,12 @@ function onChange(e) {
     handleLogoFile(el.files && el.files[0]);
     return;
   }
-  if (!el.dataset || !el.dataset.bind || el.tagName !== 'SELECT') return;
+  // Date inputs commit on `change` (blur/Enter/date-picker close), not per
+  // keystroke like text/number fields do — safe to rerender here the same
+  // way selects do, without the caret-reset problem a live onInput rerender
+  // would cause while a segment (day/month/year) is still being edited.
+  const isDateInput = el.tagName === 'INPUT' && el.type === 'date';
+  if (!el.dataset || !el.dataset.bind || !(el.tagName === 'SELECT' || isDateInput)) return;
   const bind = el.dataset.bind;
   state[bind] = el.value;
   if (bind === 'currentDepotId') {
@@ -2039,6 +2098,11 @@ function onChange(e) {
     // Keep the A4 invoice's displayed rate in lockstep with whichever FNE
     // code is picked, live, before the config is even saved.
     state.estVatRate = el.value ? String(FNE_TAX_RATES[el.value]) : state.estVatRate;
+  } else if (bind === 'repDateMode' && el.value === 'custom' && !state.repDateFrom && !state.repDateTo) {
+    // Prefill both ends to today rather than leaving the pickers blank —
+    // an empty custom range would silently fall back to "Tout l'historique".
+    const today = new Date().toISOString().slice(0, 10);
+    state.repDateFrom = today; state.repDateTo = today;
   }
   rerender();
 }
