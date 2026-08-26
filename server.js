@@ -187,7 +187,7 @@ function buildSeed() {
       recordedBy: e.cashier,
     };
   });
-  return { depots, categories, suppliers, products, clients, employees, sales, expenses, settings: defaultSettings() };
+  return { depots, categories, suppliers, products, clients, employees, sales, expenses, settings: defaultSettings(), fneConfig: defaultFneConfig() };
 }
 
 // Upgrades a pre-multi-dépôt tenant db (flat product.stock, no depots) in
@@ -246,6 +246,7 @@ function migrateTenantData(data) {
     Object.assign(data.settings, { ncc: '', taxRegime: '', taxCenter: '', bankDetails: '', vatRate: 0 });
     changed = true;
   }
+  if (!data.fneConfig) { data.fneConfig = defaultFneConfig(); changed = true; }
   return changed;
 }
 
@@ -299,6 +300,36 @@ function loadAllTenants() {
     tenants.set(t.id, data);
   });
 }
+// ---------- FNE (Facture Normalisée Électronique — DGI Côte d'Ivoire) ----------
+// Real API integration, per "PROCEDURE D'INTERFACAGE DES ENTREPRISES PAR API"
+// (DGI, mai 2025) supplied by the user. Scope: certification de facture de
+// vente only (POST /external/invoices/sign) — avoir/refund needs a returns
+// feature this app doesn't have, and bordereau d'achat is a different
+// (agricultural purchase) flow this app doesn't model. DGI's own test
+// environment URL from the doc; production URL is only handed out by DGI
+// after they validate the shop's test submissions.
+// Declared above loadAllTenants() below since migrateTenantData() (called
+// from it) needs defaultFneConfig() at module-load time — a const declared
+// after that call would still be in its temporal dead zone.
+const FNE_TEST_BASE_URL = 'http://54.247.95.108/ws';
+// The four tax codes DGI's API accepts — fixed legal categories, not a free
+// percentage. Which one applies is a real tax-status fact only the shop
+// owner can know, so it's a config choice (see PATCH /api/fne/config) never
+// inferred here. Rates are DGI's own, used only to back out HT from this
+// app's TTC selling prices when building the certification request.
+const FNE_TAX_RATES = { TVA: 18, TVAB: 9, TVAC: 0, TVAD: 0 };
+const FNE_PAYMENT_METHODS = { 'Espèces': 'cash', 'Mobile Money': 'mobile-money', Carte: 'card', Crédit: 'deferred' };
+function defaultFneConfig() {
+  return { apiKey: '', baseUrl: FNE_TEST_BASE_URL, enabled: false, taxCode: '' };
+}
+// Never send the raw key to any client, manager included — same posture as
+// employee passwordHash. The Gérant sets/replaces it write-only (see PATCH
+// /api/fne/config); hasApiKey just tells the UI whether one is on file.
+function publicFneConfig(db) {
+  const c = db.fneConfig || defaultFneConfig();
+  return { enabled: c.enabled, baseUrl: c.baseUrl, taxCode: c.taxCode, hasApiKey: !!c.apiKey };
+}
+
 loadAllTenants();
 
 // ---------- Helpers ----------
@@ -374,7 +405,7 @@ function publicEmployee(e) {
   return rest;
 }
 function publicState(db) {
-  return Object.assign({}, db, { employees: db.employees.map(publicEmployee) });
+  return Object.assign({}, db, { employees: db.employees.map(publicEmployee), fneConfig: publicFneConfig(db) });
 }
 // Finds which tenant a login username (phone or name, case-insensitive)
 // belongs to. Login has no separate "shop code" field by design — phone
@@ -482,7 +513,7 @@ async function handleApi(req, res, pathname) {
       depots: [{ id: 'd1', name: 'Dépôt principal', address: '' }],
       categories: [], suppliers: [], products: [], clients: [],
       employees: [managerEmployee], sales: [], expenses: [],
-      settings: defaultSettings(shopName),
+      settings: defaultSettings(shopName), fneConfig: defaultFneConfig(),
     };
     tenants.set(tenantId, newDb);
     tenantsMeta.push({ id: tenantId, name: shopName, createdAt: new Date().toISOString() });
@@ -523,6 +554,7 @@ async function handleApi(req, res, pathname) {
     pathname === '/api/stock-transfer' && method === 'POST',
     pathname === '/api/expenses' && method === 'POST',
     pathname === '/api/settings' && method === 'PATCH',
+    pathname === '/api/fne/config' && method === 'PATCH',
     /^\/api\/employees\/[^/]+(\/toggle)?$/.test(pathname) && method !== 'GET',
     /^\/api\/products\/[^/]+$/.test(pathname) && method === 'DELETE',
   ].some(Boolean);
@@ -589,7 +621,7 @@ async function handleApi(req, res, pathname) {
     const body = await readJSONBody(req);
     const name = (body.name || '').trim();
     if (!name) return sendJSON(res, 400, { error: 'Nom requis' });
-    const client = { id: uid('cl'), name, phone: body.phone || '', points: 0, totalSpent: 0 };
+    const client = { id: uid('cl'), name, phone: body.phone || '', ncc: (body.ncc || '').trim(), points: 0, totalSpent: 0 };
     db.clients.push(client);
     saveTenant(session.tenantId);
     return sendJSON(res, 201, client);
@@ -905,6 +937,95 @@ async function handleApi(req, res, pathname) {
     };
     saveTenant(session.tenantId);
     return sendJSON(res, 200, db.settings);
+  }
+
+  if (pathname === '/api/fne/config' && method === 'PATCH') {
+    const body = await readJSONBody(req);
+    const taxCode = body.taxCode || '';
+    if (taxCode && !(taxCode in FNE_TAX_RATES)) {
+      return sendJSON(res, 400, { error: 'Code TVA FNE invalide' });
+    }
+    const current = db.fneConfig || defaultFneConfig();
+    db.fneConfig = {
+      // Blank submission keeps the existing key — same write-only pattern
+      // as the logo field, so the Gérant never has to re-paste it on every
+      // unrelated config change.
+      apiKey: typeof body.apiKey === 'string' && body.apiKey.trim() ? body.apiKey.trim() : current.apiKey,
+      baseUrl: (body.baseUrl || '').trim() || FNE_TEST_BASE_URL,
+      enabled: !!body.enabled,
+      taxCode,
+    };
+    saveTenant(session.tenantId);
+    return sendJSON(res, 200, publicFneConfig(db));
+  }
+
+  const fneCertifyMatch = pathname.match(/^\/api\/fne\/certify\/([^/]+)$/);
+  if (fneCertifyMatch && method === 'POST') {
+    const sale = db.sales.find((s) => s.id === fneCertifyMatch[1]);
+    if (!sale) return sendJSON(res, 404, { error: 'Vente introuvable' });
+    // Never resubmit an already-certified sale — that would mint a second
+    // legal FNE invoice for the same transaction. Return the existing result.
+    if (sale.fne && sale.fne.reference) return sendJSON(res, 200, sale.fne);
+    const cfg = db.fneConfig || defaultFneConfig();
+    if (!cfg.enabled || !cfg.apiKey || !cfg.taxCode) {
+      return sendJSON(res, 400, { error: "Intégration FNE non configurée (activez-la et renseignez la clé API et le code TVA dans Établissement)" });
+    }
+    const rate = FNE_TAX_RATES[cfg.taxCode];
+    const client = sale.clientId ? db.clients.find((c) => c.id === sale.clientId) : null;
+    const payload = {
+      invoiceType: 'sale',
+      paymentMethod: FNE_PAYMENT_METHODS[sale.paymentMethod] || 'cash',
+      template: client && client.ncc ? 'B2B' : 'B2C',
+      isRne: false,
+      clientNcc: (client && client.ncc) || '',
+      clientCompanyName: sale.clientName || 'Client de passage',
+      clientPhone: (client && client.phone) || '',
+      clientEmail: '',
+      clientSellerName: sale.cashier || '',
+      pointOfSale: sale.depotName || '',
+      establishment: (db.settings && db.settings.companyName) || '',
+      commercialMessage: '',
+      footer: '',
+      foreignCurrency: '',
+      foreignCurrencyRate: 0,
+      // Our selling prices have always been tax-inclusive (TTC) — HT is
+      // backed out here using the DGI's own fixed rate for the configured
+      // code, the same reconciliation approach as the printable A4 facture.
+      items: sale.items.map((it) => {
+        const product = db.products.find((p) => p.id === it.productId);
+        return {
+          taxes: [cfg.taxCode],
+          reference: (product && product.barcode) || it.productId,
+          description: it.name,
+          quantity: it.qty,
+          amount: Math.round((it.unitPrice / (1 + rate / 100)) * 100) / 100,
+          discount: 0,
+          measurementUnit: it.unit === 'pack' ? 'paquet' : it.unit === 'carton' ? 'carton' : 'unité',
+        };
+      }),
+      discount: 0,
+    };
+    let fneRes, fneData;
+    try {
+      fneRes = await fetch(cfg.baseUrl.replace(/\/$/, '') + '/external/invoices/sign', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json', Authorization: 'Bearer ' + cfg.apiKey },
+        body: JSON.stringify(payload),
+      });
+      fneData = await fneRes.json().catch(() => ({}));
+    } catch (e) {
+      return sendJSON(res, 502, { error: 'Impossible de contacter la plateforme FNE : ' + e.message });
+    }
+    if (!fneRes.ok) {
+      return sendJSON(res, fneRes.status, { error: fneData.message || 'Erreur FNE (' + fneRes.status + ')' });
+    }
+    sale.fne = {
+      reference: fneData.reference, token: fneData.token, ncc: fneData.ncc,
+      balanceSticker: fneData.balance_sticker, warning: !!fneData.warning,
+      certifiedAt: new Date().toISOString(),
+    };
+    saveTenant(session.tenantId);
+    return sendJSON(res, 200, sale.fne);
   }
 
   return sendJSON(res, 404, { error: 'Route inconnue' });

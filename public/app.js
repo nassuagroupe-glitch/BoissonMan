@@ -25,6 +25,11 @@ const ICON_EXTERNAL = '<svg width="12" height="12" viewBox="0 0 24 24" fill="non
 const ICON_ETABLISSEMENT = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 21V9l8-5 8 5v12"></path><path d="M9 21v-6h6v6"></path><path d="M9 12h.01M15 12h.01M9 8h.01M15 8h.01"></path></svg>';
 
 const FNE_URL = 'https://fne.dgi.gouv.ci';
+// The 4 fixed DGI tax codes accepted by the real FNE certification API —
+// mirrors server.js's FNE_TAX_RATES exactly, needed here to auto-derive the
+// A4 invoice's displayed VAT rate from whichever code is configured, so the
+// printed facture can never disagree with what's actually certified.
+const FNE_TAX_RATES = { TVA: 18, TVAB: 9, TVAC: 0, TVAD: 0 };
 
 const EXPENSE_CATEGORIES = ['Salaires', 'Facture CIE', 'Facture SODECI', 'Paiement fournisseur', 'Achat marchandise', 'Don personnel', 'Imprévus', 'Autre'];
 
@@ -89,7 +94,7 @@ const state = {
   confirmDeleteProductId: null,
   showAddCategory: false, ncName: '',
   showAddSupplier: false, nsName: '', nsPhone: '', nsEmail: '',
-  showAddClient: false, ncliName: '', ncliPhone: '',
+  showAddClient: false, ncliName: '', ncliPhone: '', ncliNcc: '',
   showAddEmployee: false, neName: '', neRole: 'Caissier', nePhone: '', neDepotId: '', nePassword: '',
   editingEmployeeId: null, confirmDeleteEmployeeId: null,
   showAddDepot: false, ndName: '', ndAddress: '',
@@ -100,6 +105,7 @@ const state = {
   pwCurrent: '', pwNew: '', pwConfirm: '', pwError: null, pwSuccess: null,
   estCompanyName: '', estAddress: '', estPhone: '', estEmail: '', estTaxId: '', estLogo: '',
   estNcc: '', estTaxRegime: '', estTaxCenter: '', estBankDetails: '', estVatRate: '0',
+  fneEnabled: false, fneBaseUrl: '', fneTaxCode: '', fneHasApiKey: false, fneApiKeyInput: '', fneCertifying: false,
   receiptView: 'ticket', // 'ticket' (A6) or 'invoice' (A4 Facture) — see renderReceiptModal
   toast: null,
   showReceipt: false, lastReceipt: null,
@@ -206,6 +212,14 @@ async function loadAppState() {
     state.estNcc = settings.ncc || ''; state.estTaxRegime = settings.taxRegime || '';
     state.estTaxCenter = settings.taxCenter || ''; state.estBankDetails = settings.bankDetails || '';
     state.estVatRate = String(settings.vatRate || 0);
+    const fneConfig = data.fneConfig || {};
+    state.fneEnabled = !!fneConfig.enabled; state.fneBaseUrl = fneConfig.baseUrl || '';
+    state.fneTaxCode = fneConfig.taxCode || ''; state.fneHasApiKey = !!fneConfig.hasApiKey;
+    state.fneApiKeyInput = '';
+    // Once a real FNE tax code is configured, it becomes the authoritative
+    // rate for the A4 invoice too — otherwise the printed facture and what's
+    // actually certified with the DGI could show two different VAT figures.
+    if (state.fneTaxCode) state.estVatRate = String(FNE_TAX_RATES[state.fneTaxCode]);
     state.npCategoryId = data.categories[0] ? data.categories[0].id : '';
     state.npSupplierId = data.suppliers[0] ? data.suppliers[0].id : '';
     state.npDepotId = state.depots[0] ? state.depots[0].id : '';
@@ -627,6 +641,39 @@ async function saveSettings() {
   } catch (e) { flashToast(e.message); }
 }
 
+// ---------- FNE (facturation électronique DGI) ----------
+async function saveFNEConfig() {
+  if (state.fneTaxCode) state.estVatRate = String(FNE_TAX_RATES[state.fneTaxCode]);
+  try {
+    const cfg = await api('PATCH', '/api/fne/config', {
+      apiKey: state.fneApiKeyInput, baseUrl: state.fneBaseUrl, enabled: state.fneEnabled, taxCode: state.fneTaxCode,
+    });
+    state.fneEnabled = cfg.enabled; state.fneBaseUrl = cfg.baseUrl;
+    state.fneTaxCode = cfg.taxCode; state.fneHasApiKey = cfg.hasApiKey;
+    state.fneApiKeyInput = '';
+    flashToast('Configuration FNE enregistrée');
+    rerender();
+  } catch (e) { flashToast(e.message); }
+}
+async function certifyWithFNE() {
+  const r = state.lastReceipt;
+  if (!r || state.fneCertifying) return;
+  state.fneCertifying = true;
+  rerender();
+  try {
+    const fne = await api('POST', `/api/fne/certify/${r.id}`);
+    r.fne = fne;
+    const sale = state.sales.find((s) => s.id === r.id);
+    if (sale) sale.fne = fne;
+    flashToast('Facture certifiée FNE : ' + fne.reference);
+  } catch (e) {
+    flashToast(e.message || 'Échec de la certification FNE');
+  } finally {
+    state.fneCertifying = false;
+    rerender();
+  }
+}
+
 // ---------- Depots ----------
 async function addDepot() {
   if (!state.ndName.trim()) return;
@@ -663,9 +710,9 @@ async function addSupplier() {
 async function addClient() {
   if (!state.ncliName.trim()) return;
   try {
-    const client = await api('POST', '/api/clients', { name: state.ncliName.trim(), phone: state.ncliPhone });
+    const client = await api('POST', '/api/clients', { name: state.ncliName.trim(), phone: state.ncliPhone, ncc: state.ncliNcc });
     state.clients.push(client);
-    state.showAddClient = false; state.ncliName = ''; state.ncliPhone = '';
+    state.showAddClient = false; state.ncliName = ''; state.ncliPhone = ''; state.ncliNcc = '';
     flashToast('Client ajouté : ' + client.name);
     rerender();
   } catch (e) { flashToast(e.message); }
@@ -1208,6 +1255,7 @@ function renderClients() {
   const addFormHtml = state.showAddClient ? `<div class="add-form cols-inline" style="gap:10px">
     <input id="field-ncliName" class="field" style="flex:1" type="text" placeholder="Nom du client" value="${esc(state.ncliName)}" data-bind="ncliName" />
     <input id="field-ncliPhone" class="field" style="flex:1" type="text" placeholder="Téléphone" value="${esc(state.ncliPhone)}" data-bind="ncliPhone" />
+    <input id="field-ncliNcc" class="field" style="flex:1" type="text" placeholder="NCC (si client professionnel, optionnel)" value="${esc(state.ncliNcc)}" data-bind="ncliNcc" />
     <div class="save-btn" data-action="addClient">Enregistrer</div>
   </div>` : '';
   return `<div>
@@ -1446,7 +1494,7 @@ function renderEtablissement() {
         <input id="field-estTaxRegime" class="field-lg" type="text" placeholder="Régime d'imposition" value="${esc(state.estTaxRegime)}" data-bind="estTaxRegime" />
         <input id="field-estTaxCenter" class="field-lg" type="text" placeholder="Centre des impôts" value="${esc(state.estTaxCenter)}" data-bind="estTaxCenter" />
         <input id="field-estBankDetails" class="field-lg" type="text" placeholder="Références bancaires" value="${esc(state.estBankDetails)}" data-bind="estBankDetails" />
-        <input id="field-estVatRate" class="field-lg" type="number" min="0" max="100" step="0.5" placeholder="Taux de TVA (%) — laisser 0 si non applicable" value="${esc(state.estVatRate)}" data-bind="estVatRate" />
+        <input id="field-estVatRate" class="field-lg" type="number" min="0" max="100" step="0.5" placeholder="Taux de TVA (%) — laisser 0 si non applicable" value="${esc(state.estVatRate)}" data-bind="estVatRate"${state.fneTaxCode ? ' readonly title="Déterminé par le code TVA FNE ci-dessous"' : ''} />
         <div>
           <div style="font-size:12px;color:var(--muted);margin-bottom:6px">Logo</div>
           ${logoPreview}
@@ -1457,6 +1505,31 @@ function renderEtablissement() {
         </div>
         <div class="save-btn" style="padding:11px;justify-content:center" data-action="saveSettings">Enregistrer</div>
       </div>
+    </div>
+    ${renderFNEConfigCard()}
+  </div>`;
+}
+
+function renderFNEConfigCard() {
+  const taxCodeOptions = [
+    ['', 'Non configuré'],
+    ['TVA', 'TVA — normal 18%'],
+    ['TVAB', 'TVAB — réduit 9%'],
+    ['TVAC', 'TVAC — exonération conventionnelle 0%'],
+    ['TVAD', 'TVAD — exonération légale 0% (TEE/RME)'],
+  ].map(([v, label]) => `<option value="${v}"${state.fneTaxCode === v ? ' selected' : ''}>${esc(label)}</option>`).join('');
+  const keyPlaceholder = state.fneHasApiKey ? 'Clé déjà enregistrée — laisser vide pour ne pas la changer' : "Clé API fournie par la DGI (espace FNE > Paramétrage)";
+  return `<div class="card" style="margin-top:16px">
+    <div class="card-title">Intégration FNE (facturation électronique DGI)</div>
+    <div style="font-size:12.5px;color:var(--muted);margin-bottom:14px">Nécessite une inscription et une clé API obtenues sur le portail FNE de la DGI. Certification réelle de facture de vente uniquement (pas les avoirs ni les bordereaux d'achat).</div>
+    <div style="display:flex;flex-direction:column;gap:10px">
+      <label style="display:flex;align-items:center;gap:8px;font-size:13px;font-weight:600">
+        <input type="checkbox" data-action="toggleFneEnabled"${state.fneEnabled ? ' checked' : ''} /> Activer la certification FNE
+      </label>
+      <input id="field-fneApiKeyInput" class="field-lg" type="password" placeholder="${esc(keyPlaceholder)}" value="${esc(state.fneApiKeyInput)}" data-bind="fneApiKeyInput" autocomplete="off" />
+      <input id="field-fneBaseUrl" class="field-lg" type="text" placeholder="URL de l'API (test par défaut)" value="${esc(state.fneBaseUrl)}" data-bind="fneBaseUrl" />
+      <select id="field-fneTaxCode" class="field-lg" data-bind="fneTaxCode">${taxCodeOptions}</select>
+      <div class="save-btn" style="padding:11px;justify-content:center" data-action="saveFNEConfig">Enregistrer la configuration FNE</div>
     </div>
   </div>`;
 }
@@ -1757,6 +1830,21 @@ async function sendToFNE() {
   window.open(FNE_URL, '_blank', 'noopener');
 }
 
+function renderFNECertifyPanel(r) {
+  const configured = state.fneEnabled && state.fneHasApiKey && state.fneTaxCode;
+  if (!configured) return '';
+  if (r.fne && r.fne.reference) {
+    return `<div class="no-print fne-certify-panel fne-certify-done">
+      <div><strong>Certifiée FNE</strong> — Référence : ${esc(r.fne.reference)}${r.fne.warning ? ' <span style="color:var(--danger)">⚠ stock de stickers faible</span>' : ''}</div>
+      ${r.fne.token ? `<a href="${esc(r.fne.token)}" target="_blank" rel="noopener" style="color:var(--green);font-weight:600">Voir la vérification officielle →</a>` : ''}
+    </div>`;
+  }
+  return `<div class="no-print fne-certify-panel">
+    <div>Envoyer cette vente à la plateforme FNE de la DGI pour obtenir une facture certifiée officielle (numéro + lien de vérification).</div>
+    <div class="fne-copy-chip" data-action="certifyWithFNE"${state.fneCertifying ? ' style="opacity:.6;pointer-events:none"' : ''}>${state.fneCertifying ? 'Certification en cours…' : 'Certifier via FNE (API)'}</div>
+  </div>`;
+}
+
 function renderReceiptModal() {
   if (!state.showReceipt || !state.lastReceipt) return '';
   const r = state.lastReceipt;
@@ -1771,6 +1859,7 @@ function renderReceiptModal() {
         </div>
       </div>
       <div class="receipt-body">${isInvoice ? renderInvoiceHtml(r) : renderTicketHtml(r)}</div>
+      ${isInvoice ? renderFNECertifyPanel(r) : ''}
       ${isInvoice ? `<div class="no-print fne-copy-panel">
         <div class="fne-copy-title">Aide à la saisie FNE — copiez juste le bloc qu'il vous faut pour le coller au bon endroit sur le portail</div>
         <div class="fne-copy-chips">
@@ -1879,6 +1968,9 @@ const Actions = {
   submitChangePassword: () => changePassword(),
   saveSettings: () => saveSettings(),
   removeLogo: () => { state.estLogo = ''; rerender(); },
+  toggleFneEnabled: () => { state.fneEnabled = !state.fneEnabled; rerender(); },
+  saveFNEConfig: () => saveFNEConfig(),
+  certifyWithFNE: () => certifyWithFNE(),
 };
 
 function onClick(e) {
@@ -1936,6 +2028,10 @@ function onChange(e) {
     // stream itself restarted, not just the state value updated.
     switchCameraDevice(el.value);
     return;
+  } else if (bind === 'fneTaxCode') {
+    // Keep the A4 invoice's displayed rate in lockstep with whichever FNE
+    // code is picked, live, before the config is even saved.
+    state.estVatRate = el.value ? String(FNE_TAX_RATES[el.value]) : state.estVatRate;
   }
   rerender();
 }
