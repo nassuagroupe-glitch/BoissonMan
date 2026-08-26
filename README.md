@@ -1,4 +1,4 @@
-# BoissonMan
+# NassuaGroup
 
 Application de gestion pour supermarché de boissons — login (Gérant / Caissier), tableau de bord, caisse (scan code-barres caméra ou douchette USB, panier, reçu imprimable A6), stocks, catégories, fournisseurs, clients (fidélité), rapports, employés.
 

@@ -906,5 +906,5 @@ server.on('error', (err) => {
 });
 
 server.listen(PORT, HOST, () => {
-  console.log(`BoissonMan disponible sur http://${HOST}:${PORT}`);
+  console.log(`NassuaGroup disponible sur http://${HOST}:${PORT}`);
 });
