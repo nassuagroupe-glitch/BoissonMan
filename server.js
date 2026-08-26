@@ -242,6 +242,10 @@ function migrateTenantData(data) {
     }
   });
   if (!data.settings) { data.settings = defaultSettings(); changed = true; }
+  else if (data.settings.ncc === undefined) {
+    Object.assign(data.settings, { ncc: '', taxRegime: '', taxCenter: '', bankDetails: '', vatRate: 0 });
+    changed = true;
+  }
   return changed;
 }
 
@@ -305,7 +309,13 @@ function uid(prefix) {
 // email/tax id + logo) — per-tenant, blank by default rather than fabricated,
 // same as every other per-tenant field.
 function defaultSettings(companyName) {
-  return { companyName: companyName || '', address: '', phone: '', email: '', taxId: '', logo: '' };
+  return {
+    companyName: companyName || '', address: '', phone: '', email: '', taxId: '', logo: '',
+    // Used by the printable A4 "Facture" (see POST-checkout invoice view in
+    // app.js) — NCC/régime/centre des impôts/RIB have no sensible fallback,
+    // left blank until the shop fills them in rather than fabricated.
+    ncc: '', taxRegime: '', taxCenter: '', bankDetails: '', vatRate: 0,
+  };
 }
 // A data: URI logo is stored inline in the tenant's JSON (no file storage in
 // this zero-dependency app) — capped well under readJSONBody's 1MB request
@@ -879,6 +889,7 @@ async function handleApi(req, res, pathname) {
     if (typeof body.logo === 'string' && body.logo.length > MAX_LOGO_LENGTH) {
       return sendJSON(res, 400, { error: 'Logo trop volumineux (taille maximale ~500 Ko)' });
     }
+    const vatRate = Math.max(0, Math.min(100, Number(body.vatRate) || 0));
     db.settings = {
       companyName: (body.companyName || '').trim(),
       address: (body.address || '').trim(),
@@ -886,6 +897,11 @@ async function handleApi(req, res, pathname) {
       email: (body.email || '').trim(),
       taxId: (body.taxId || '').trim(),
       logo: typeof body.logo === 'string' ? body.logo : (db.settings.logo || ''),
+      ncc: (body.ncc || '').trim(),
+      taxRegime: (body.taxRegime || '').trim(),
+      taxCenter: (body.taxCenter || '').trim(),
+      bankDetails: (body.bankDetails || '').trim(),
+      vatRate,
     };
     saveTenant(session.tenantId);
     return sendJSON(res, 200, db.settings);

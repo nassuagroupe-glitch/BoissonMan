@@ -99,6 +99,8 @@ const state = {
   showAddExpense: false, exCategory: EXPENSE_CATEGORIES[0], exCustomCategory: '', exAmount: '', exDepotId: '', exNote: '',
   pwCurrent: '', pwNew: '', pwConfirm: '', pwError: null, pwSuccess: null,
   estCompanyName: '', estAddress: '', estPhone: '', estEmail: '', estTaxId: '', estLogo: '',
+  estNcc: '', estTaxRegime: '', estTaxCenter: '', estBankDetails: '', estVatRate: '0',
+  receiptView: 'ticket', // 'ticket' (A6) or 'invoice' (A4 Facture) — see renderReceiptModal
   toast: null,
   showReceipt: false, lastReceipt: null,
 };
@@ -201,6 +203,9 @@ async function loadAppState() {
     state.estCompanyName = settings.companyName || ''; state.estAddress = settings.address || '';
     state.estPhone = settings.phone || ''; state.estEmail = settings.email || '';
     state.estTaxId = settings.taxId || ''; state.estLogo = settings.logo || '';
+    state.estNcc = settings.ncc || ''; state.estTaxRegime = settings.taxRegime || '';
+    state.estTaxCenter = settings.taxCenter || ''; state.estBankDetails = settings.bankDetails || '';
+    state.estVatRate = String(settings.vatRate || 0);
     state.npCategoryId = data.categories[0] ? data.categories[0].id : '';
     state.npSupplierId = data.suppliers[0] ? data.suppliers[0].id : '';
     state.npDepotId = state.depots[0] ? state.depots[0].id : '';
@@ -321,7 +326,7 @@ async function checkout() {
     }
     state.sales.unshift(sale);
     state.cart = []; state.posClientId = ''; state.posAdvance = '';
-    state.lastReceipt = sale; state.showReceipt = true;
+    state.lastReceipt = sale; state.showReceipt = true; state.receiptView = 'ticket';
     rerender();
   } catch (e) {
     flashToast(e.message || "Erreur lors de l'encaissement");
@@ -608,10 +613,15 @@ async function saveSettings() {
     const settings = await api('PATCH', '/api/settings', {
       companyName: state.estCompanyName, address: state.estAddress, phone: state.estPhone,
       email: state.estEmail, taxId: state.estTaxId, logo: state.estLogo,
+      ncc: state.estNcc, taxRegime: state.estTaxRegime, taxCenter: state.estTaxCenter,
+      bankDetails: state.estBankDetails, vatRate: Number(state.estVatRate) || 0,
     });
     state.estCompanyName = settings.companyName; state.estAddress = settings.address;
     state.estPhone = settings.phone; state.estEmail = settings.email;
     state.estTaxId = settings.taxId; state.estLogo = settings.logo;
+    state.estNcc = settings.ncc; state.estTaxRegime = settings.taxRegime;
+    state.estTaxCenter = settings.taxCenter; state.estBankDetails = settings.bankDetails;
+    state.estVatRate = String(settings.vatRate || 0);
     flashToast('Établissement mis à jour');
     rerender();
   } catch (e) { flashToast(e.message); }
@@ -1431,6 +1441,12 @@ function renderEtablissement() {
         <input id="field-estPhone" class="field-lg" type="text" placeholder="Téléphone" value="${esc(state.estPhone)}" data-bind="estPhone" />
         <input id="field-estEmail" class="field-lg" type="email" placeholder="Email" value="${esc(state.estEmail)}" data-bind="estEmail" />
         <input id="field-estTaxId" class="field-lg" type="text" placeholder="Identifiant fiscal (RCCM / IFU)" value="${esc(state.estTaxId)}" data-bind="estTaxId" />
+        <div class="card-title" style="font-size:12.5px;margin:6px 0 0">Pour la facture A4</div>
+        <input id="field-estNcc" class="field-lg" type="text" placeholder="NCC (Numéro de Compte Contribuable)" value="${esc(state.estNcc)}" data-bind="estNcc" />
+        <input id="field-estTaxRegime" class="field-lg" type="text" placeholder="Régime d'imposition" value="${esc(state.estTaxRegime)}" data-bind="estTaxRegime" />
+        <input id="field-estTaxCenter" class="field-lg" type="text" placeholder="Centre des impôts" value="${esc(state.estTaxCenter)}" data-bind="estTaxCenter" />
+        <input id="field-estBankDetails" class="field-lg" type="text" placeholder="Références bancaires" value="${esc(state.estBankDetails)}" data-bind="estBankDetails" />
+        <input id="field-estVatRate" class="field-lg" type="number" min="0" max="100" step="0.5" placeholder="Taux de TVA (%) — laisser 0 si non applicable" value="${esc(state.estVatRate)}" data-bind="estVatRate" />
         <div>
           <div style="font-size:12px;color:var(--muted);margin-bottom:6px">Logo</div>
           ${logoPreview}
@@ -1502,9 +1518,7 @@ function renderScannerModal() {
   </div>`;
 }
 
-function renderReceiptModal() {
-  if (!state.showReceipt || !state.lastReceipt) return '';
-  const r = state.lastReceipt;
+function renderTicketHtml(r) {
   const dateObj = new Date(r.date);
   const dateLabel = dateObj.toLocaleDateString('fr-FR');
   const timeLabel = dateObj.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' });
@@ -1526,30 +1540,129 @@ function renderReceiptModal() {
   const brandSubHtml = state.estCompanyName
     ? `${contactLine ? `<div class="receipt-brand-sub">${esc(contactLine)}</div>` : ''}${taxLine ? `<div class="receipt-brand-sub">${esc(taxLine)}</div>` : ''}`
     : `<div class="receipt-brand-sub">Gestionnaire Magasin</div>`;
+  return `<div id="receipt-print">
+      <div class="receipt-brand"><div class="receipt-logo">${brandLogo}</div><div class="receipt-brand-name">${esc(brandName)}</div>${brandSubHtml}</div>
+      <div class="receipt-meta">
+        <div class="receipt-meta-row"><span>Reçu</span><span>#${esc(r.id.slice(-6).toUpperCase())}</span></div>
+        <div class="receipt-meta-row"><span>Date</span><span>${esc(dateLabel)} — ${esc(timeLabel)}</span></div>
+        <div class="receipt-meta-row"><span>Dépôt</span><span>${esc(r.depotName || '')}</span></div>
+        <div class="receipt-meta-row"><span>Caissier</span><span>${esc(r.cashier)}</span></div>
+        ${clientRow}
+      </div>
+      <div class="receipt-items">${itemsHtml}</div>
+      <div class="receipt-total"><span>Total</span><span>${fcfa(r.total)}</span></div>
+      <div class="receipt-pay"><span>Paiement</span><span>${esc(r.paymentMethod)}</span></div>
+      ${r.paymentMethod === 'Crédit' && r.creditPaid > 0 ? `<div class="receipt-pay"><span>Avance versée</span><span>${fcfa(r.creditPaid)}</span></div>` : ''}
+      ${r.paymentMethod === 'Crédit' ? `<div class="receipt-pay"><span>Solde restant</span><span>${fcfa(r.creditRemaining)}</span></div>` : ''}
+      <div class="receipt-thanks">Merci de votre achat !</div>
+    </div>`;
+}
+
+// Prices in this app have never carried a separate tax component — they're
+// the actual amount collected (TTC). When a VAT rate is configured, HT is
+// back-computed from that TTC line total rather than added on top, so
+// TOTAL HT + TVA always reconciles exactly to r.total (what was really
+// charged). A 0% rate (the default) makes HT == TTC, i.e. no VAT at all —
+// this app has no per-product tax data to justify inventing anything else.
+function renderInvoiceHtml(r) {
+  const dateObj = new Date(r.date);
+  const dateTimeLabel = `${dateObj.toLocaleDateString('fr-FR')} ${dateObj.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })}`;
+  const vatRate = Number(state.estVatRate) || 0;
+  const client = r.clientId ? state.clients.find((c) => c.id === r.clientId) : null;
+
+  let totalHT = 0, totalVAT = 0;
+  const rows = r.items.map((it) => {
+    const product = state.products.find((p) => p.id === it.productId);
+    const ref = (product && product.barcode) || it.productId;
+    const unitLabel = it.unit === 'pack' ? 'Paquet' : it.unit === 'carton' ? 'Carton' : 'Détail';
+    const ht = it.lineTotal / (1 + vatRate / 100);
+    totalHT += ht; totalVAT += it.lineTotal - ht;
+    return `<tr>
+      <td>${esc(ref)}</td>
+      <td>${esc(it.name)}</td>
+      <td class="right">${fcfa(ht / it.qty)}</td>
+      <td class="center">${it.qty}</td>
+      <td class="center">${esc(unitLabel)}</td>
+      <td class="center">${vatRate}</td>
+      <td class="center">0</td>
+      <td class="right">${fcfa(ht)}</td>
+    </tr>`;
+  }).join('');
+
+  const identityBox = `<div class="inv-box">
+    <div style="font-weight:700">${esc(state.estCompanyName || 'Établissement non renseigné')}</div>
+    ${state.estNcc ? `<div>NCC : ${esc(state.estNcc)}</div>` : ''}
+    ${state.estTaxRegime ? `<div>Régime d'imposition : ${esc(state.estTaxRegime)}</div>` : ''}
+    ${state.estTaxCenter ? `<div>Centre des impôts : ${esc(state.estTaxCenter)}</div>` : ''}
+  </div>`;
+  const logoHtml = state.estLogo ? `<img class="inv-logo" src="${state.estLogo}" alt="Logo" />` : '';
+
+  const vatLabel = vatRate > 0 ? `TVA ${vatRate}%` : 'Pas de TVA appliquée (0%)';
+
+  return `<div id="invoice-print">
+    <div class="inv-header">
+      ${identityBox}
+      ${logoHtml}
+    </div>
+    ${state.estTaxId ? `<div class="inv-line">RCCM : ${esc(state.estTaxId)}</div>` : ''}
+    <div class="inv-line">Références bancaires : ${esc(state.estBankDetails || '')}</div>
+    <div class="inv-cols">
+      <div>
+        <div class="inv-section-title">Établissement</div>
+        <div class="inv-line">${esc(state.estCompanyName || '')}</div>
+        ${state.estAddress ? `<div class="inv-line">Adresse : ${esc(state.estAddress)}</div>` : ''}
+        ${state.estPhone ? `<div class="inv-line">N° Tel : ${esc(state.estPhone)}</div>` : ''}
+        ${state.estEmail ? `<div class="inv-line">Mail : ${esc(state.estEmail)}</div>` : ''}
+        <div class="inv-line">Nom du vendeur : ${esc(r.cashier)}</div>
+        <div class="inv-line">Nom de PDV : ${esc(r.depotName || '')}</div>
+        <div class="inv-line">Date et heure : ${esc(dateTimeLabel)}</div>
+        <div class="inv-line">Mode de paiement : ${esc(r.paymentMethod)}</div>
+      </div>
+      <div>
+        <div class="inv-section-title">Client</div>
+        <div class="inv-line">Nom : ${esc(r.clientName || 'Client de passage')}</div>
+        ${client && client.phone ? `<div class="inv-line">Téléphone : ${esc(client.phone)}</div>` : ''}
+      </div>
+    </div>
+    <table class="inv-table">
+      <tr><th>Réf</th><th>Désignation</th><th class="right">P.U HT</th><th class="center">Qté</th><th class="center">Unité</th><th class="center">Taxes (%)</th><th class="center">Rem. (%)</th><th class="right">Montant HT</th></tr>
+      ${rows}
+    </table>
+    <table class="inv-totals">
+      <tr><td>TOTAL HT</td><td class="right">${fcfa(totalHT)}</td></tr>
+      <tr><td>TVA</td><td class="right">${fcfa(totalVAT)}</td></tr>
+      <tr><td style="font-weight:700">TOTAL TTC</td><td class="right" style="font-weight:700">${fcfa(totalHT + totalVAT)}</td></tr>
+      <tr><td>AUTRES TAXES</td><td class="right">${fcfa(0)}</td></tr>
+      <tr><td>TIMBRE DE QUITTANCE</td><td class="right">${fcfa(0)}</td></tr>
+      <tr><td style="font-weight:700">TOTAL A PAYER</td><td class="right" style="font-weight:700">${fcfa(r.total)}</td></tr>
+      ${r.paymentMethod === 'Crédit' && r.creditPaid > 0 ? `<tr><td>Avance versée</td><td class="right">${fcfa(r.creditPaid)}</td></tr>` : ''}
+      ${r.paymentMethod === 'Crédit' ? `<tr><td>Solde restant</td><td class="right">${fcfa(r.creditRemaining)}</td></tr>` : ''}
+    </table>
+    <div class="inv-section-title" style="margin-top:16px">Résumé de la facture</div>
+    <table class="inv-table">
+      <tr><th>Catégorie</th><th class="right">Sous-total</th><th class="center">Taux (%)</th><th class="right">Total taxes</th></tr>
+      <tr><td>${esc(vatLabel)}</td><td class="right">${fcfa(totalHT)}</td><td class="center">${vatRate}</td><td class="right">${fcfa(totalVAT)}</td></tr>
+    </table>
+  </div>`;
+}
+
+function renderReceiptModal() {
+  if (!state.showReceipt || !state.lastReceipt) return '';
+  const r = state.lastReceipt;
+  const isInvoice = state.receiptView === 'invoice';
   return `<div class="modal-overlay no-print">
-    <div class="modal-card receipt-modal">
-      <div class="modal-header no-print"><div class="modal-title">Reçu de vente</div><div class="modal-close" data-action="closeReceipt">×</div></div>
-      <div class="receipt-body">
-        <div id="receipt-print">
-          <div class="receipt-brand"><div class="receipt-logo">${brandLogo}</div><div class="receipt-brand-name">${esc(brandName)}</div>${brandSubHtml}</div>
-          <div class="receipt-meta">
-            <div class="receipt-meta-row"><span>Reçu</span><span>#${esc(r.id.slice(-6).toUpperCase())}</span></div>
-            <div class="receipt-meta-row"><span>Date</span><span>${esc(dateLabel)} — ${esc(timeLabel)}</span></div>
-            <div class="receipt-meta-row"><span>Dépôt</span><span>${esc(r.depotName || '')}</span></div>
-            <div class="receipt-meta-row"><span>Caissier</span><span>${esc(r.cashier)}</span></div>
-            ${clientRow}
-          </div>
-          <div class="receipt-items">${itemsHtml}</div>
-          <div class="receipt-total"><span>Total</span><span>${fcfa(r.total)}</span></div>
-          <div class="receipt-pay"><span>Paiement</span><span>${esc(r.paymentMethod)}</span></div>
-          ${r.paymentMethod === 'Crédit' && r.creditPaid > 0 ? `<div class="receipt-pay"><span>Avance versée</span><span>${fcfa(r.creditPaid)}</span></div>` : ''}
-          ${r.paymentMethod === 'Crédit' ? `<div class="receipt-pay"><span>Solde restant</span><span>${fcfa(r.creditRemaining)}</span></div>` : ''}
-          <div class="receipt-thanks">Merci de votre achat !</div>
+    <div class="modal-card receipt-modal${isInvoice ? ' invoice-mode' : ''}">
+      <div class="modal-header no-print">
+        <div class="modal-title">${isInvoice ? 'Facture (A4)' : 'Reçu de vente'}</div>
+        <div style="display:flex;align-items:center;gap:14px">
+          <span style="cursor:pointer;color:var(--green);font-size:12.5px;font-weight:600" data-action="toggleReceiptView">${isInvoice ? '← Voir le reçu' : 'Voir la facture A4'}</span>
+          <div class="modal-close" data-action="closeReceipt">×</div>
         </div>
       </div>
+      <div class="receipt-body">${isInvoice ? renderInvoiceHtml(r) : renderTicketHtml(r)}</div>
       <div class="modal-footer no-print">
         <div class="modal-footer-btn secondary" data-action="closeReceipt">Fermer</div>
-        <div class="modal-footer-btn primary" data-action="printReceipt">Imprimer (A6)</div>
+        <div class="modal-footer-btn primary" data-action="printReceipt">${isInvoice ? 'Imprimer (A4)' : 'Imprimer (A6)'}</div>
       </div>
     </div>
   </div>`;
@@ -1637,7 +1750,8 @@ const Actions = {
   cancelDeleteEmployee: () => { state.confirmDeleteEmployeeId = null; rerender(); },
   confirmDeleteEmployee: (ds) => deleteEmployee(ds.id),
   toggleEmployeeActive: (ds) => toggleEmployeeActive(ds.id),
-  closeReceipt: () => { state.showReceipt = false; rerender(); },
+  closeReceipt: () => { state.showReceipt = false; state.receiptView = 'ticket'; rerender(); },
+  toggleReceiptView: () => { state.receiptView = state.receiptView === 'ticket' ? 'invoice' : 'ticket'; rerender(); },
   printReceipt: () => window.print(),
   submitChangePassword: () => changePassword(),
   saveSettings: () => saveSettings(),
