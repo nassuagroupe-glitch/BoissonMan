@@ -288,8 +288,23 @@ function loadAllTenants() {
   migrateSingleTenantLayout();
   if (fs.existsSync(TENANTS_META_PATH)) {
     tenantsMeta = JSON.parse(fs.readFileSync(TENANTS_META_PATH, 'utf8'));
+  } else if (ADMIN_SECRET) {
+    // Hosted multi-tenant platform (e.g. Railway): a genuinely fresh install
+    // stays empty on purpose — only the platform owner mints new shops, via
+    // the ADMIN_SECRET-gated POST /api/admin/tenants.
+    tenantsMeta = [];
   } else {
-    tenantsMeta = []; // fresh install, no shop created yet — see POST /api/admin/tenants
+    // Standalone install (e.g. the Windows installer put on a shop's own
+    // PC): there is no platform owner and no ADMIN_SECRET to call the admin
+    // route with, so a shop with zero tenants would be permanently stuck at
+    // the login screen with nothing to log into. Auto-create one demo-seeded
+    // "Boutique principale" tenant, mirroring the old pre-multi-tenant
+    // fresh-install behavior.
+    const id = 'default';
+    tenants.set(id, buildSeed());
+    saveTenant(id);
+    tenantsMeta = [{ id, name: 'Boutique principale', createdAt: new Date().toISOString() }];
+    saveTenantsMeta();
   }
   tenants.clear();
   tenantsMeta.forEach((t) => {
