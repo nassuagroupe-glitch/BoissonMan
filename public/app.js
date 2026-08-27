@@ -1884,13 +1884,35 @@ async function sendToFNE() {
   window.open(FNE_URL, '_blank', 'noopener');
 }
 
+// Renders the DGI verification token as a scannable QR code, so a shopper
+// can check authenticity with their phone instead of typing/clicking the
+// link. Uses the same CDN-script pattern as ZXing (see index.html) rather
+// than a hand-rolled encoder — a from-scratch QR implementation (Reed-Solomon
+// ECC, mask selection) is easy to get subtly wrong in a way that produces
+// codes that *look* right but don't scan, which isn't worth the risk here.
+function buildFneQrSvg(url) {
+  try {
+    const qr = window.qrcode(0, 'M');
+    qr.addData(url);
+    qr.make();
+    return qr.createSvgTag({ cellSize: 4, margin: 2 });
+  } catch (e) {
+    return '';
+  }
+}
 function renderFNECertifyPanel(r) {
   const configured = state.fneEnabled && state.fneHasApiKey && state.fneTaxCode;
   if (!configured) return '';
   if (r.fne && r.fne.reference) {
+    const stickerLine = Number.isFinite(r.fne.balanceSticker)
+      ? `<div${r.fne.warning ? ' style="color:var(--danger)"' : ''}>${r.fne.warning ? '⚠ ' : ''}Stickers FNE restants : ${r.fne.balanceSticker}</div>`
+      : '';
+    const qrSvg = r.fne.token ? buildFneQrSvg(r.fne.token) : '';
     return `<div class="no-print fne-certify-panel fne-certify-done">
-      <div><strong>Certifiée FNE</strong> — Référence : ${esc(r.fne.reference)}${r.fne.warning ? ' <span style="color:var(--danger)">⚠ stock de stickers faible</span>' : ''}</div>
+      <div><strong>Certifiée FNE</strong> — Référence : ${esc(r.fne.reference)}</div>
+      ${stickerLine}
       ${r.fne.token ? `<a href="${esc(r.fne.token)}" target="_blank" rel="noopener" style="color:var(--green);font-weight:600">Voir la vérification officielle →</a>` : ''}
+      ${qrSvg ? `<div class="fne-qr">${qrSvg}</div>` : ''}
     </div>`;
   }
   return `<div class="no-print fne-certify-panel">
