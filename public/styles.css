@@ -259,7 +259,15 @@ table.inv-totals td { padding: 5px 8px; border-top: 1px solid #ddd; }
 
   /* Sidebar becomes an off-canvas drawer, toggled by the hamburger button
      in the topbar (see .menu-toggle and the "mobile-nav-open" class on
-     .shell, set from state.mobileNavOpen in app.js). */
+     .shell, set from state.mobileNavOpen in app.js). With 13 nav items
+     (as Gérant) plus the depot switcher and footer, the drawer's content
+     can be taller than a phone's viewport — overflow-y:auto is the safety
+     net so the bottom items (Rapports, Employés, Établissement, Mon
+     compte, déconnexion) stay reachable instead of silently overflowing
+     past a position:fixed box with nothing to scroll it. The tightened
+     padding/gap below is a first line of defense to avoid needing that
+     scroll at all on a typical phone height.
+  */
   .shell { position: relative; }
   .sidebar {
     position: fixed; top: 0; left: 0; bottom: 0; z-index: 1000;
@@ -267,8 +275,15 @@ table.inv-totals td { padding: 5px 8px; border-top: 1px solid #ddd; }
     transform: translateX(-100%);
     transition: transform 0.22s ease;
     box-shadow: 0 0 40px rgba(0,0,0,0.35);
+    overflow-y: auto;
+    padding: 14px 12px;
   }
   .shell.mobile-nav-open .sidebar { transform: translateX(0); }
+  .sidebar-brand { padding-bottom: 14px; }
+  .nav-item { padding: 8px 10px; font-size: 13px; }
+  .sidebar-nav { gap: 2px; }
+  .sidebar-depot { padding: 10px 4px; }
+  .sidebar-footer { padding-top: 10px; }
   .sidebar-backdrop {
     display: block; position: fixed; inset: 0; background: rgba(10,16,14,0.5);
     z-index: 999; opacity: 0; pointer-events: none; transition: opacity 0.22s ease;
@@ -286,16 +301,21 @@ table.inv-totals td { padding: 5px 8px; border-top: 1px solid #ddd; }
   .add-form.cols-4 { grid-template-columns: 1fr; }
   .add-form.cols-inline { flex-wrap: wrap; }
 
-  /* Caisse (POS): the desktop layout relies on a fixed 100vh shell with the
-     product grid and cart each scrolling internally within their own
-     column. On a phone there's no room for two side-by-side columns, so it
-     switches to one normal flowing column — products, then the cart below —
-     scrolled by .content like every other screen instead. */
-  .pos-grid { display: block; height: auto; }
-  .pos-products-col { overflow-y: visible; margin-bottom: 16px; }
+  /* Caisse (POS): there's no room for the desktop's two side-by-side
+     columns, so products stack above the cart. But the cart — payment
+     method and the "Encaisser" button — must stay reachable without
+     scrolling past the whole product catalog first, since that's the
+     control a cashier needs constantly. So this keeps the same
+     fixed-height-with-internal-scroll idea as desktop, just re-oriented
+     vertically: .pos-grid fills the full height .content gives it, the
+     product grid gets whatever space is left and scrolls on its own, and
+     the cart is capped to at most 48% of that height and never pushed
+     off-screen by a tall product list above it. */
+  .pos-grid { display: flex; flex-direction: column; height: 100%; gap: 12px; }
+  .pos-products-col { flex: 1; min-height: 0; overflow-y: auto; padding-right: 0; }
   .pos-product-grid { grid-template-columns: repeat(2, 1fr); }
-  .cart-panel { height: auto; }
-  .cart-items { max-height: 320px; }
+  .cart-panel { flex-shrink: 0; max-height: 48vh; }
+  .cart-items { flex: 1; }
   .stepper-btn { width: 30px; height: 30px; }
 
   table.data-table { font-size: 12.5px; }
