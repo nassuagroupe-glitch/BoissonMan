@@ -23,6 +23,7 @@ const ICON_EXPENSE = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none
 const ICON_FACTURATION = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 2.5h8l4 4v14.5a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V3.5a1 1 0 0 1 1-1z"></path><path d="M14 2.5V6.5h4"></path><path d="M7.5 12h5M7.5 15h5M7.5 18h3"></path></svg>';
 const ICON_EXTERNAL = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3"><path d="M9 5H5a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-4"></path><path d="M15 3h6v6"></path><path d="M10 14 21 3"></path></svg>';
 const ICON_ETABLISSEMENT = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 21V9l8-5 8 5v12"></path><path d="M9 21v-6h6v6"></path><path d="M9 12h.01M15 12h.01M9 8h.01M15 8h.01"></path></svg>';
+const ICON_MENU = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3"><path d="M3 6h18M3 12h18M3 18h18"></path></svg>';
 
 const FNE_URL = 'https://fne.dgi.gouv.ci';
 // The 4 fixed DGI tax codes accepted by the real FNE certification API —
@@ -110,6 +111,7 @@ const state = {
   receiptView: 'ticket', // 'ticket' (A6) or 'invoice' (A4 Facture) — see renderReceiptModal
   toast: null,
   showReceipt: false, lastReceipt: null,
+  mobileNavOpen: false, // sidebar drawer state on phone-width screens (see the max-width:900px block in styles.css)
 };
 
 // ---------- Helpers ----------
@@ -849,8 +851,9 @@ function renderLogin() {
 }
 
 function renderShell() {
-  return `<div class="shell">
+  return `<div class="shell${state.mobileNavOpen ? ' mobile-nav-open' : ''}">
     ${renderSidebar()}
+    <div class="sidebar-backdrop" data-action="closeMobileNav"></div>
     <div class="main">${renderTopbar()}<div class="content">${renderScreen()}</div></div>
     ${renderScannerModal()}
     ${renderUnitPickerModal()}
@@ -914,7 +917,10 @@ function renderTopbar() {
   const t = TITLES[state.screen] || TITLES.dashboard;
   const today = new Date().toLocaleDateString('fr-FR', { weekday: 'long', day: 'numeric', month: 'long' });
   return `<div class="topbar">
-    <div><div class="topbar-title">${t[0]}</div><div class="topbar-subtitle">${t[1]}</div></div>
+    <div style="display:flex;align-items:center;gap:12px;min-width:0">
+      <div class="menu-toggle" data-action="toggleMobileNav" aria-label="Menu">${ICON_MENU}</div>
+      <div style="min-width:0"><div class="topbar-title">${t[0]}</div><div class="topbar-subtitle">${t[1]}</div></div>
+    </div>
     <div style="display:flex;align-items:center;gap:16px"><div class="topbar-date">${esc(today)}</div></div>
   </div>`;
 }
@@ -978,10 +984,10 @@ function renderDashboard() {
     </div>
     <div class="card" style="margin-top:16px">
       <div class="card-title">Ventes récentes</div>
-      <table class="data-table">
+      <div class="table-card" style="border:none;border-radius:0"><table class="data-table">
         <tr><th>DATE</th><th>CAISSIER</th><th>DÉPÔT</th><th>ARTICLES</th><th>PAIEMENT</th><th class="right">TOTAL</th></tr>
         ${salesRowsHtml}
-      </table>
+      </table></div>
     </div>`;
 }
 
@@ -1972,7 +1978,9 @@ const Actions = {
   backToRoleSelect: () => { state.loginMode = null; state.loginUsername = ''; state.loginPassword = ''; state.loginError = null; rerender(); },
   submitLogin: () => submitLogin(),
   logout: () => logout(),
-  nav: (ds) => { state.screen = ds.screen; state.pwError = null; state.pwSuccess = null; state.confirmDeleteEmployeeId = null; state.confirmDeleteProductId = null; rerender(); },
+  nav: (ds) => { state.screen = ds.screen; state.pwError = null; state.pwSuccess = null; state.confirmDeleteEmployeeId = null; state.confirmDeleteProductId = null; state.mobileNavOpen = false; rerender(); },
+  toggleMobileNav: () => { state.mobileNavOpen = !state.mobileNavOpen; rerender(); },
+  closeMobileNav: () => { state.mobileNavOpen = false; rerender(); },
   openExternal: (ds) => { window.open(ds.url, '_blank', 'noopener'); },
   setPosCatAll: () => { state.posCategory = 'all'; rerender(); },
   setPosCategory: (ds) => { state.posCategory = ds.id; rerender(); },
