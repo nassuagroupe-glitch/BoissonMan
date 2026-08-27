@@ -524,6 +524,19 @@ function buildSaleFromCart(db, depot, body, opts) {
 function lastActiveManager(db, employeeId) {
   return db.employees.filter((e) => e.role === 'Gérant' && e.active && e.id !== employeeId).length === 0;
 }
+// "Gérant" is the only role string that grants manager-level permissions
+// (see the login handler: `role === 'Gérant' ? 'manager' : 'cashier'`).
+// Every other value — Caissier, or any of the job-title options the client
+// offers on the Employés page (Employé, Chauffeur, Magasinier, ... or a
+// free-text "Autre" entry) — is just a roster label and always maps to
+// cashier-level access, so this only needs to protect the "Gérant" string
+// itself; anything else the client sends is trusted as-is (falling back to
+// "Caissier" only when nothing usable was sent at all).
+function resolveEmployeeRole(rawRole) {
+  if (rawRole === 'Gérant') return 'Gérant';
+  const trimmed = String(rawRole || '').trim();
+  return trimmed || 'Caissier';
+}
 function hashPassword(password, salt) {
   salt = salt || crypto.randomBytes(16).toString('hex');
   const hash = crypto.scryptSync(password, salt, 64).toString('hex');
@@ -781,7 +794,7 @@ async function handleApi(req, res, pathname) {
     // has no separate shop-code field, so it's what resolves which shop an
     // employee belongs to (see findEmployeeAcrossTenants above).
     if (phoneUsedByAnyTenant(phone)) return sendJSON(res, 409, { error: 'Ce numéro de téléphone est déjà utilisé par un autre employé' });
-    const role = body.role === 'Gérant' ? 'Gérant' : 'Caissier';
+    const role = resolveEmployeeRole(body.role);
     const employee = Object.assign({
       id: uid('e'), name, role, phone, active: true,
       depotId: body.depotId || null,
@@ -814,7 +827,7 @@ async function handleApi(req, res, pathname) {
       employee.name = name;
     }
     if (body.role !== undefined) {
-      const newRole = body.role === 'Gérant' ? 'Gérant' : 'Caissier';
+      const newRole = resolveEmployeeRole(body.role);
       if (employee.role === 'Gérant' && newRole !== 'Gérant' && employee.active && lastActiveManager(db, employee.id)) {
         return sendJSON(res, 409, { error: 'Impossible de rétrograder le dernier compte Gérant actif' });
       }

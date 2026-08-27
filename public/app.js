@@ -33,6 +33,14 @@ const FNE_URL = 'https://fne.dgi.gouv.ci';
 const FNE_TAX_RATES = { TVA: 18, TVAB: 9, TVAC: 0, TVAD: 0 };
 
 const EXPENSE_CATEGORIES = ['Salaires', 'Facture CIE', 'Facture SODECI', 'Paiement fournisseur', 'Achat marchandise', 'Don personnel', 'Imprévus', 'Autre'];
+// "Gérant" is special — it's the only value that grants manager-level
+// permissions (see server.js: `role === 'Gérant' ? 'manager' : 'cashier'`).
+// Every other option here, including a free-text "Autre" entry, is purely a
+// job-title label for the staff roster — none of them change what the
+// account can do, and none of them appear on the login screen (which only
+// ever offers the Gérant/Caissier buttons, matching the two real
+// permission levels).
+const EMPLOYEE_ROLES = ['Gérant', 'Caissier', 'Employé', 'Chauffeur', 'Magasinier', 'Gardien', 'Comptable', 'Technicien', 'Coursier', 'Autre'];
 
 const CAT_ICONS = {
   sodas: '<svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M10 2h4v3.5c1.3.6 2 1.7 2 3v11.5a2 2 0 0 1-2 2h-4a2 2 0 0 1-2-2V8.5c0-1.3.7-2.4 2-3V2z"></path><path d="M8 12h8"></path><circle cx="14.5" cy="9.5" r="0.4" fill="currentColor" stroke="none"></circle></svg>',
@@ -97,7 +105,7 @@ const state = {
   showAddCategory: false, ncName: '',
   showAddSupplier: false, nsName: '', nsPhone: '', nsEmail: '',
   showAddClient: false, ncliName: '', ncliPhone: '', ncliNcc: '',
-  showAddEmployee: false, neName: '', neRole: 'Caissier', nePhone: '', neDepotId: '', nePassword: '',
+  showAddEmployee: false, neName: '', neRole: 'Caissier', neCustomRole: '', nePhone: '', neDepotId: '', nePassword: '',
   editingEmployeeId: null, confirmDeleteEmployeeId: null,
   showAddDepot: false, ndName: '', ndAddress: '',
   showTransfer: false, trProductId: '', trFromDepotId: '', trToDepotId: '', trQty: '',
@@ -978,7 +986,7 @@ async function addClient() {
 }
 function resetEmployeeForm() {
   state.showAddEmployee = false; state.editingEmployeeId = null;
-  state.neName = ''; state.neRole = 'Caissier'; state.nePhone = ''; state.neDepotId = ''; state.nePassword = '';
+  state.neName = ''; state.neRole = 'Caissier'; state.neCustomRole = ''; state.nePhone = ''; state.neDepotId = ''; state.nePassword = '';
 }
 function openAddEmployeeForm() {
   resetEmployeeForm();
@@ -989,7 +997,12 @@ function openEditEmployeeForm(id) {
   const e = state.employees.find((emp) => emp.id === id);
   if (!e) return;
   state.editingEmployeeId = id;
-  state.neName = e.name; state.neRole = e.role; state.nePhone = e.phone || ''; state.neDepotId = e.depotId || '';
+  state.neName = e.name; state.nePhone = e.phone || ''; state.neDepotId = e.depotId || '';
+  // A stored role outside the fixed list only happens via a free-text
+  // "Autre" entry — reselect Autre and prefill the custom field so editing
+  // doesn't silently discard it.
+  if (EMPLOYEE_ROLES.includes(e.role)) { state.neRole = e.role; state.neCustomRole = ''; }
+  else { state.neRole = 'Autre'; state.neCustomRole = e.role; }
   state.nePassword = '';
   state.confirmDeleteEmployeeId = null;
   state.showAddEmployee = true;
@@ -999,9 +1012,11 @@ function saveEmployee() {
 }
 async function addEmployee() {
   if (!state.neName.trim() || state.nePassword.length < 4) return;
+  const role = state.neRole === 'Autre' ? state.neCustomRole.trim() : state.neRole;
+  if (!role) { flashToast('Précisez le poste'); return; }
   try {
     const employee = await api('POST', '/api/employees', {
-      name: state.neName.trim(), role: state.neRole, phone: state.nePhone, depotId: state.neDepotId || null, password: state.nePassword,
+      name: state.neName.trim(), role, phone: state.nePhone, depotId: state.neDepotId || null, password: state.nePassword,
     });
     state.employees.push(employee);
     resetEmployeeForm();
@@ -1011,9 +1026,11 @@ async function addEmployee() {
 }
 async function updateEmployee() {
   if (!state.neName.trim()) return;
+  const role = state.neRole === 'Autre' ? state.neCustomRole.trim() : state.neRole;
+  if (!role) { flashToast('Précisez le poste'); return; }
   try {
     const updated = await api('PATCH', `/api/employees/${state.editingEmployeeId}`, {
-      name: state.neName.trim(), role: state.neRole, phone: state.nePhone, depotId: state.neDepotId || null,
+      name: state.neName.trim(), role, phone: state.nePhone, depotId: state.neDepotId || null,
     });
     const idx = state.employees.findIndex((e) => e.id === updated.id);
     if (idx >= 0) state.employees[idx] = updated;
@@ -1767,12 +1784,13 @@ function renderEmployes() {
     </tr>`;
   }).join('');
   const passwordFieldHtml = isEditing ? '' : `<input id="field-nePassword" class="field" type="password" placeholder="Mot de passe (4 car. min)" value="${esc(state.nePassword)}" data-bind="nePassword" autocomplete="new-password" />`;
+  const roleOptionsHtml = EMPLOYEE_ROLES.map((r) => `<option value="${esc(r)}"${state.neRole === r ? ' selected' : ''}>${esc(r)}</option>`).join('');
+  const customRoleHtml = state.neRole === 'Autre'
+    ? `<input id="field-neCustomRole" class="field" type="text" placeholder="Préciser le poste" value="${esc(state.neCustomRole)}" data-bind="neCustomRole" />` : '';
   const addFormHtml = state.showAddEmployee ? `<div class="add-form cols-4">
     <input id="field-neName" class="field" type="text" placeholder="Nom complet" value="${esc(state.neName)}" data-bind="neName" />
-    <select id="field-neRole" class="field" data-bind="neRole">
-      <option value="Gérant"${state.neRole === 'Gérant' ? ' selected' : ''}>Gérant</option>
-      <option value="Caissier"${state.neRole === 'Caissier' ? ' selected' : ''}>Caissier</option>
-    </select>
+    <select id="field-neRole" class="field" data-bind="neRole">${roleOptionsHtml}</select>
+    ${customRoleHtml}
     <input id="field-nePhone" class="field" type="text" placeholder="Téléphone" value="${esc(state.nePhone)}" data-bind="nePhone" />
     <select id="field-neDepotId" class="field" data-bind="neDepotId"><option value="">Tous les dépôts</option>${depotOptions}</select>
     ${passwordFieldHtml}
