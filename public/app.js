@@ -268,7 +268,20 @@ function loadOfflineSnapshots() {
   try {
     const raw = localStorage.getItem(OFFLINE_SNAPSHOT_KEY);
     const parsed = raw ? JSON.parse(raw) : {};
-    return parsed && typeof parsed === 'object' ? parsed : {};
+    if (!parsed || typeof parsed !== 'object') return {};
+    // Before the per-employee rework, this key held ONE flat snapshot object
+    // directly (`{token, userId, userName, ...}`), not a dict keyed by
+    // username. A device that had already cached a snapshot under that old
+    // shape would otherwise get its top-level fields (token/userId/...)
+    // merged in as if each were its own cached identity the next time
+    // saveOfflineSnapshot() ran — exactly the "Travailler hors ligne
+    // (token)" / "(userId)" / "(role)" ... corruption a real user hit.
+    // Detect and discard rather than trying to guess which username it
+    // belonged to (that information didn't exist in the old shape) — losing
+    // one stale cached identity just means that one employee needs to log
+    // in online once more, no real data is at risk.
+    if ('token' in parsed && 'userName' in parsed) return {};
+    return parsed;
   } catch (e) { return {}; }
 }
 function saveOfflineSnapshot(username) {
