@@ -398,6 +398,128 @@ function packagingInfo(product, unit) {
   if (unit === 'carton' && product.unitsPerCarton > 0) return { price: product.pricePerCarton, multiplier: product.unitsPerCarton };
   return { price: product.price, multiplier: 1 };
 }
+// Builds a sale record from a cart, shared by the normal online POST
+// /api/checkout and the offline-sync endpoint. The two modes genuinely
+// differ (not just a flag on identical logic), so they're kept as separate
+// blocks rather than unified line-by-line:
+//   - tolerateNegativeStock:false (normal online sale) — prices every line
+//     LIVE from current server data (packagingInfo), pre-validates the whole
+//     cart and rejects with an error before mutating anything if any line is
+//     out of stock or the request is malformed. This is byte-for-byte the
+//     same behavior /api/checkout always had.
+//   - tolerateNegativeStock:true (offline sync) — the sale already happened
+//     out in the shop while offline; rejecting it now would be a real data
+//     loss, not a validation nicety. So it trusts the client's own snapshot
+//     of each line (name/unitPrice/lineTotal/qty/baseQty, computed at the
+//     moment of the offline sale — reusing today's live price would make the
+//     recorded sale disagree with what the customer's receipt actually
+//     showed) and only uses the live product record to deduct stock, letting
+//     it go negative and flagging the line with stockConflict when it does
+//     (or when the product was deleted before sync — its snapshot fields are
+//     kept instead of aborting the whole sale).
+function buildSaleFromCart(db, depot, body, opts) {
+  const tolerateNegativeStock = !!(opts && opts.tolerateNegativeStock);
+  const cart = Array.isArray(body.cart) ? body.cart : [];
+  if (cart.length === 0) return { error: 'Panier vide' };
+  const paymentMethod = body.paymentMethod || 'Espèces';
+  if (paymentMethod === 'Crédit' && !body.clientId) {
+    return { error: 'Un client est requis pour une vente à crédit' };
+  }
+
+  let items, total, advance = 0;
+
+  if (!tolerateNegativeStock) {
+    // Validate the whole cart before mutating anything.
+    let precomputedTotal = 0;
+    for (const ci of cart) {
+      const product = db.products.find((p) => p.id === ci.productId);
+      if (!product) return { error: 'Produit introuvable : ' + ci.productId };
+      const pkg = packagingInfo(product, ci.unit);
+      const baseQty = ci.qty * pkg.multiplier;
+      if (ci.qty <= 0 || baseQty > stockAt(product, depot.id)) {
+        return { error: 'Stock insuffisant pour ' + product.name + ' au ' + depot.name, status: 409 };
+      }
+      precomputedTotal += pkg.price * ci.qty;
+    }
+    if (paymentMethod === 'Crédit') {
+      advance = Number(body.advance) || 0;
+      if (advance < 0) return { error: 'Avance invalide' };
+      if (advance > precomputedTotal) return { error: "L'avance ne peut pas dépasser le total de la vente" };
+    }
+
+    total = 0;
+    items = cart.map((ci) => {
+      const product = db.products.find((p) => p.id === ci.productId);
+      const pkg = packagingInfo(product, ci.unit);
+      const baseQty = ci.qty * pkg.multiplier;
+      product.stockByDepot[depot.id] = stockAt(product, depot.id) - baseQty;
+      product.sold += baseQty;
+      const lineTotal = pkg.price * ci.qty;
+      total += lineTotal;
+      return { productId: product.id, name: product.name, unit: ci.unit || 'detail', qty: ci.qty, unitPrice: pkg.price, lineTotal, baseQty };
+    });
+  } else {
+    total = 0;
+    items = cart.map((ci) => {
+      const product = db.products.find((p) => p.id === ci.productId);
+      const baseQty = Number(ci.baseQty) || 0;
+      let stockConflict = false;
+      if (product) {
+        const available = stockAt(product, depot.id);
+        if (baseQty > available) stockConflict = true;
+        product.stockByDepot[depot.id] = available - baseQty;
+        product.sold += baseQty;
+      } else {
+        stockConflict = true; // product deleted before this offline sale synced
+      }
+      const qty = Number(ci.qty) || 0;
+      const unitPrice = Number(ci.unitPrice) || 0;
+      const lineTotal = Number(ci.lineTotal) || unitPrice * qty;
+      total += lineTotal;
+      return {
+        productId: ci.productId, name: ci.name || (product && product.name) || 'Produit supprimé',
+        unit: ci.unit || 'detail', qty, unitPrice, lineTotal, baseQty, stockConflict,
+      };
+    });
+    if (paymentMethod === 'Crédit') {
+      // Already validated client-side at the moment of the offline sale
+      // (same rule as the online path) — clamp defensively rather than
+      // reject, since an offline sale must never be refused after the fact.
+      advance = Math.min(Math.max(Number(body.advance) || 0, 0), total);
+    }
+  }
+
+  let clientName = '';
+  if (body.clientId) {
+    const client = db.clients.find((c) => c.id === body.clientId);
+    if (client) {
+      clientName = client.name;
+      client.points += Math.floor(total / 100);
+      client.totalSpent += total;
+    }
+  }
+
+  const sale = {
+    id: uid('sale'),
+    date: (tolerateNegativeStock && body.clientDate) || new Date().toISOString(),
+    cashier: body.cashier || 'Caissier',
+    depotId: depot.id,
+    depotName: depot.name,
+    clientId: body.clientId || '',
+    clientName,
+    itemCount: items.reduce((a, it) => a + it.baseQty, 0),
+    total,
+    paymentMethod,
+    items,
+  };
+  if (tolerateNegativeStock && items.some((it) => it.stockConflict)) sale.stockConflict = true;
+  if (paymentMethod === 'Crédit') {
+    sale.creditPaid = advance;
+    sale.creditRemaining = total - advance;
+    sale.creditPayments = advance > 0 ? [{ id: uid('pay'), date: sale.date, amount: advance }] : [];
+  }
+  return { sale };
+}
 // True if removing/demoting/deactivating employeeId would leave zero active Gérant accounts.
 function lastActiveManager(db, employeeId) {
   return db.employees.filter((e) => e.role === 'Gérant' && e.active && e.id !== employeeId).length === 0;
@@ -823,77 +945,43 @@ async function handleApi(req, res, pathname) {
 
   if (pathname === '/api/checkout' && method === 'POST') {
     const body = await readJSONBody(req);
-    const cart = Array.isArray(body.cart) ? body.cart : [];
-    if (cart.length === 0) return sendJSON(res, 400, { error: 'Panier vide' });
     const depot = db.depots.find((d) => d.id === body.depotId);
     if (!depot) return sendJSON(res, 400, { error: 'Dépôt invalide' });
-    const paymentMethod = body.paymentMethod || 'Espèces';
-    if (paymentMethod === 'Crédit' && !body.clientId) {
-      return sendJSON(res, 400, { error: 'Un client est requis pour une vente à crédit' });
-    }
-
-    // Validate stock availability before committing anything.
-    let precomputedTotal = 0;
-    for (const ci of cart) {
-      const product = db.products.find((p) => p.id === ci.productId);
-      if (!product) return sendJSON(res, 400, { error: 'Produit introuvable : ' + ci.productId });
-      const pkg = packagingInfo(product, ci.unit);
-      const baseQty = ci.qty * pkg.multiplier;
-      if (ci.qty <= 0 || baseQty > stockAt(product, depot.id)) {
-        return sendJSON(res, 409, { error: 'Stock insuffisant pour ' + product.name + ' au ' + depot.name });
-      }
-      precomputedTotal += pkg.price * ci.qty;
-    }
-    let advance = 0;
-    if (paymentMethod === 'Crédit') {
-      advance = Number(body.advance) || 0;
-      if (advance < 0) return sendJSON(res, 400, { error: 'Avance invalide' });
-      if (advance > precomputedTotal) return sendJSON(res, 400, { error: "L'avance ne peut pas dépasser le total de la vente" });
-    }
-
-    let total = 0;
-    const items = cart.map((ci) => {
-      const product = db.products.find((p) => p.id === ci.productId);
-      const pkg = packagingInfo(product, ci.unit);
-      const baseQty = ci.qty * pkg.multiplier;
-      product.stockByDepot[depot.id] = stockAt(product, depot.id) - baseQty;
-      product.sold += baseQty;
-      const lineTotal = pkg.price * ci.qty;
-      total += lineTotal;
-      return { productId: product.id, name: product.name, unit: ci.unit || 'detail', qty: ci.qty, unitPrice: pkg.price, lineTotal, baseQty };
-    });
-
-    let clientName = '';
-    if (body.clientId) {
-      const client = db.clients.find((c) => c.id === body.clientId);
-      if (client) {
-        clientName = client.name;
-        client.points += Math.floor(total / 100);
-        client.totalSpent += total;
-      }
-    }
-
-    const sale = {
-      id: uid('sale'),
-      date: new Date().toISOString(),
-      cashier: body.cashier || 'Caissier',
-      depotId: depot.id,
-      depotName: depot.name,
-      clientId: body.clientId || '',
-      clientName,
-      itemCount: items.reduce((a, it) => a + it.baseQty, 0),
-      total,
-      paymentMethod,
-      items,
-    };
-    if (paymentMethod === 'Crédit') {
-      sale.creditPaid = advance;
-      sale.creditRemaining = total - advance;
-      sale.creditPayments = advance > 0 ? [{ id: uid('pay'), date: sale.date, amount: advance }] : [];
-    }
-    db.sales.unshift(sale);
+    const result = buildSaleFromCart(db, depot, body, { tolerateNegativeStock: false });
+    if (result.error) return sendJSON(res, result.status || 400, { error: result.error });
+    db.sales.unshift(result.sale);
     saveTenant(session.tenantId);
-    return sendJSON(res, 201, { sale });
+    return sendJSON(res, 201, { sale: result.sale });
+  }
+
+  const offlineSyncMatch = pathname === '/api/sync/offline-sales' && method === 'POST';
+  if (offlineSyncMatch) {
+    const body = await readJSONBody(req);
+    const pending = Array.isArray(body.sales) ? body.sales : [];
+    const results = [];
+    const seenThisBatch = new Set();
+    // Oldest-first, matching the client outbox's chronological order — every
+    // other insertion point in this app unshifts under a newest-first
+    // invariant, so processing oldest-to-newest and unshifting each one, in
+    // order, is what keeps db.sales correctly ordered after a multi-sale batch.
+    for (const saleBody of pending) {
+      const offlineKey = saleBody.offlineKey;
+      if (!offlineKey || seenThisBatch.has(offlineKey)) continue;
+      seenThisBatch.add(offlineKey);
+      // Idempotent: a retried batch (e.g. after a dropped connection mid-sync)
+      // must never create a duplicate sale for a key already recorded.
+      const existing = db.sales.find((s) => s.offlineKey === offlineKey);
+      if (existing) { results.push({ offlineKey, sale: existing }); continue; }
+      const depot = db.depots.find((d) => d.id === saleBody.depotId);
+      if (!depot) { results.push({ offlineKey, error: 'Dépôt invalide' }); continue; }
+      const result = buildSaleFromCart(db, depot, saleBody, { tolerateNegativeStock: true });
+      if (result.error) { results.push({ offlineKey, error: result.error }); continue; }
+      result.sale.offlineKey = offlineKey;
+      db.sales.unshift(result.sale);
+      results.push({ offlineKey, sale: result.sale });
+    }
+    saveTenant(session.tenantId);
+    return sendJSON(res, 200, { results });
   }
 
   const creditPaymentMatch = pathname.match(/^\/api\/credit-sales\/([^/]+)\/payment$/);

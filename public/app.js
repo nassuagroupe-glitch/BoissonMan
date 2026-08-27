@@ -112,6 +112,8 @@ const state = {
   toast: null,
   showReceipt: false, lastReceipt: null,
   mobileNavOpen: false, // sidebar drawer state on phone-width screens (see the max-width:900px block in styles.css)
+  offlineMode: false, // true when resumed via "Travailler hors ligne" — see the offline-mode section
+  offlineSyncBlocked: false, // true when a sync attempt hit a 401 (expired cached token) — outbox is safe, just needs a fresh online login
 };
 
 // ---------- Helpers ----------
@@ -121,6 +123,12 @@ function esc(v) {
 function fcfa(n) { return Math.round(n || 0).toLocaleString('fr-FR') + ' FCFA'; }
 function capitalize(s) { return s ? s.charAt(0).toUpperCase() + s.slice(1) : s; }
 function stockStatus(qty, minStock) {
+  // Negative stock only happens via an offline sale synced after another
+  // device already sold the same product down to zero during the same
+  // outage — a rare, accepted trade-off (see server.js's
+  // tolerateNegativeStock) that needs manual correction, so it's flagged
+  // distinctly from a normal Rupture (simply sold out, nothing wrong).
+  if (qty < 0) return { label: 'Négatif', cls: 'negative' };
   if (qty <= 0) return { label: 'Rupture', cls: 'danger' };
   if (qty <= minStock) return { label: 'Faible', cls: 'warning' };
   return { label: 'OK', cls: 'ok' };
@@ -201,14 +209,25 @@ function inDateRange(iso, range) {
 }
 
 // ---------- API ----------
-// Kept only in memory (never localStorage) — matches the app's existing
-// no-persisted-login behavior, a fresh page load always requires re-login.
+// Kept only in memory (never localStorage) for the normal login flow — a
+// fresh page load always requires re-login, unchanged. The one deliberate
+// exception is OFFLINE_SNAPSHOT_KEY below: a minimal resumable snapshot
+// (including the token) written to localStorage after every successful
+// online login specifically so "Travailler hors ligne" can work at all when
+// the page is reloaded during an outage — see the offline-mode section.
 let authToken = null;
 async function api(method, url, body) {
   const opts = { method, headers: {} };
   if (authToken) opts.headers['Authorization'] = 'Bearer ' + authToken;
   if (body !== undefined) { opts.headers['Content-Type'] = 'application/json'; opts.body = JSON.stringify(body); }
-  const res = await fetch(url, opts);
+  let res;
+  try {
+    res = await fetch(url, opts);
+  } catch (e) {
+    const netErr = new Error('Pas de connexion Internet — cette action nécessite d’être en ligne.');
+    netErr.isNetworkError = true;
+    throw netErr;
+  }
   const data = await res.json().catch(() => ({}));
   if (res.status === 401 && url !== '/api/login' && state.loggedIn) {
     logout();
@@ -217,6 +236,51 @@ async function api(method, url, body) {
   }
   if (!res.ok) throw new Error(data.error || 'Erreur serveur');
   return data;
+}
+
+// ---------- Offline mode ----------
+// Caisse-only (see checkout()/syncOfflineSales() below). Two localStorage
+// keys: OFFLINE_SNAPSHOT_KEY holds enough of the last online session to
+// resume as that employee without a password (an explicit, informed
+// trade-off — see project notes); OFFLINE_OUTBOX_KEY holds sales made while
+// offline, pending sync, and is never cleared by logout() (losing a
+// recorded sale would be a real bug, not just a UX rough edge).
+const OFFLINE_SNAPSHOT_KEY = 'bm_offline_snapshot';
+const OFFLINE_OUTBOX_KEY = 'bm_offline_outbox';
+function saveOfflineSnapshot() {
+  try {
+    localStorage.setItem(OFFLINE_SNAPSHOT_KEY, JSON.stringify({
+      token: authToken, userId: state.userId, userName: state.userName, role: state.role, depotId: state.currentDepotId,
+      products: state.products, categories: state.categories, clients: state.clients, depots: state.depots,
+      savedAt: new Date().toISOString(),
+    }));
+  } catch (e) {}
+}
+function loadOfflineSnapshot() {
+  try {
+    const raw = localStorage.getItem(OFFLINE_SNAPSHOT_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch (e) { return null; }
+}
+function clearOfflineSnapshot() {
+  try { localStorage.removeItem(OFFLINE_SNAPSHOT_KEY); } catch (e) {}
+}
+function hasOfflineSnapshot() {
+  return !!loadOfflineSnapshot();
+}
+function getOutbox() {
+  try {
+    const raw = localStorage.getItem(OFFLINE_OUTBOX_KEY);
+    return raw ? JSON.parse(raw) : [];
+  } catch (e) { return []; }
+}
+function setOutbox(list) {
+  try { localStorage.setItem(OFFLINE_OUTBOX_KEY, JSON.stringify(list)); } catch (e) {}
+}
+function addToOutbox(sale) {
+  const outbox = getOutbox();
+  outbox.push(sale); // chronological order matters for sync — see syncOfflineSales()
+  setOutbox(outbox);
 }
 
 // ---------- Toast ----------
@@ -273,27 +337,54 @@ async function submitLogin() {
     authToken = data.token;
     await loadAppState();
     state.loggedIn = true; state.role = data.role; state.userId = data.userId; state.userName = data.userName; state.screen = 'dashboard';
+    state.offlineMode = false;
     state.loginMode = null; state.loginUsername = ''; state.loginPassword = ''; state.loginError = null;
     const depotId = data.depotId || (state.depots[0] && state.depots[0].id) || '';
     state.currentDepotId = depotId;
     state.stockDepotFilter = depotId; state.dashDepotFilter = depotId; state.repDepotFilter = depotId; state.expenseDepotFilter = depotId;
     state.npDepotId = depotId; state.neDepotId = depotId; state.exDepotId = depotId;
+    saveOfflineSnapshot();
     rerender();
+    // Fire-and-forget: a fresh online login is exactly the moment to flush
+    // any sales queued during a prior offline session on this device.
+    syncOfflineSales();
   } catch (e) {
     authToken = null;
     state.loginError = e.message || 'Connexion impossible';
     rerender();
   }
 }
+// "Travailler hors ligne": resumes the last successful online login on this
+// device from OFFLINE_SNAPSHOT_KEY, with no password (there's no way to
+// verify one without the server) — an explicit, user-requested trade-off.
+function workOffline() {
+  const snap = loadOfflineSnapshot();
+  if (!snap) return;
+  authToken = snap.token;
+  state.loggedIn = true; state.offlineMode = true;
+  state.role = snap.role; state.userId = snap.userId; state.userName = snap.userName;
+  state.products = snap.products; state.categories = snap.categories; state.clients = snap.clients; state.depots = snap.depots;
+  state.currentDepotId = snap.depotId;
+  state.stockDepotFilter = snap.depotId; state.dashDepotFilter = snap.depotId; state.repDepotFilter = snap.depotId; state.expenseDepotFilter = snap.depotId;
+  state.screen = 'caisse'; // the only screen this mode actually supports
+  state.loginMode = null; state.loginUsername = ''; state.loginPassword = ''; state.loginError = null;
+  rerender();
+}
 function logout() {
-  if (authToken) api('POST', '/api/logout').catch(() => {});
+  if (getOutbox().length > 0) {
+    flashToast('Ventes hors ligne non synchronisées — connectez-vous à Internet avant de vous déconnecter.');
+    return;
+  }
+  if (authToken && !state.offlineMode) api('POST', '/api/logout').catch(() => {});
   authToken = null;
   state.loggedIn = false; state.role = null; state.userName = ''; state.userId = null; state.screen = 'dashboard'; state.cart = [];
+  state.offlineMode = false;
   state.loginMode = null; state.loginUsername = ''; state.loginPassword = ''; state.loginError = null;
   // Drop any data fetched under the previous session so a slow-to-close tab
   // never shows one user's data after another logs in on the same browser.
   state.depots = []; state.categories = []; state.suppliers = []; state.products = [];
   state.clients = []; state.employees = []; state.sales = []; state.expenses = [];
+  clearOfflineSnapshot();
   rerender();
 }
 async function changePassword() {
@@ -352,34 +443,142 @@ function removeFromCart(productId, unit) {
   state.cart = state.cart.filter((c) => !(c.productId === productId && c.unit === unit));
   rerender();
 }
+// Applies a completed sale (from the server, or built locally while
+// offline) to local state the same way regardless of where it came from —
+// used by both the online and offline branches of checkout() below.
+function applySaleLocally(sale) {
+  sale.items.forEach((it) => {
+    const p = state.products.find((pp) => pp.id === it.productId);
+    if (p) { p.stockByDepot[sale.depotId] = stockAt(p, sale.depotId) - it.baseQty; p.sold += it.baseQty; }
+  });
+  if (sale.clientId) {
+    const c = state.clients.find((cc) => cc.id === sale.clientId);
+    if (c) { c.points += Math.floor(sale.total / 100); c.totalSpent += sale.total; }
+  }
+  state.sales.unshift(sale);
+}
+// Builds a sale entirely client-side from the current cart, using the same
+// pricing helper (packagingFor) the online path's server call would use —
+// mirrors server.js's buildSaleFromCart(..., {tolerateNegativeStock:true}).
+// Basic input validation (advance vs. total) still happens here, same as
+// the online path would reject it — only the *stock-availability* check is
+// the part offline mode deliberately skips (per the accepted trade-off),
+// and addToCart()/changeCartQty() already cap quantities against locally-
+// known stock, so this never knowingly oversells against itself.
+function buildOfflineSale() {
+  const depotId = state.currentDepotId;
+  let total = 0;
+  const items = state.cart.map((ci) => {
+    const p = state.products.find((pp) => pp.id === ci.productId);
+    const pkg = packagingFor(p, ci.unit);
+    const baseQty = ci.qty * pkg.multiplier;
+    const lineTotal = pkg.price * ci.qty;
+    total += lineTotal;
+    return { productId: ci.productId, name: p ? p.name : ci.productId, unit: ci.unit || 'detail', qty: ci.qty, unitPrice: pkg.price, lineTotal, baseQty };
+  });
+  let advance = 0;
+  if (state.paymentMethod === 'Crédit') {
+    advance = Number(state.posAdvance) || 0;
+    if (advance < 0 || advance > total) return { error: "L'avance ne peut pas dépasser le total de la vente" };
+  }
+  let clientName = '';
+  if (state.posClientId) {
+    const c = state.clients.find((cc) => cc.id === state.posClientId);
+    if (c) clientName = c.name;
+  }
+  const now = new Date().toISOString();
+  const offlineKey = crypto.randomUUID();
+  const sale = {
+    id: 'offline-' + offlineKey,
+    offlineKey,
+    date: now,
+    cashier: state.userName || 'Caissier',
+    depotId, depotName: depotName(depotId),
+    clientId: state.posClientId || '', clientName,
+    itemCount: items.reduce((a, it) => a + it.baseQty, 0),
+    total,
+    paymentMethod: state.paymentMethod,
+    items,
+    pending: true,
+  };
+  if (state.paymentMethod === 'Crédit') {
+    sale.creditPaid = advance;
+    sale.creditRemaining = total - advance;
+    sale.creditPayments = advance > 0 ? [{ id: 'offline-pay-' + crypto.randomUUID(), date: now, amount: advance }] : [];
+  }
+  const syncPayload = {
+    offlineKey, clientDate: now,
+    cart: items.map((it) => ({ productId: it.productId, name: it.name, unit: it.unit, qty: it.qty, unitPrice: it.unitPrice, lineTotal: it.lineTotal, baseQty: it.baseQty })),
+    clientId: state.posClientId || '', paymentMethod: state.paymentMethod, cashier: state.userName, depotId,
+    advance: state.paymentMethod === 'Crédit' ? advance : undefined,
+  };
+  return { sale, syncPayload };
+}
+function checkoutOffline() {
+  const built = buildOfflineSale();
+  if (built.error) { flashToast(built.error); rerender(); return; }
+  applySaleLocally(built.sale);
+  addToOutbox(built.syncPayload);
+  state.cart = []; state.posClientId = ''; state.posAdvance = '';
+  state.lastReceipt = built.sale; state.showReceipt = true; state.receiptView = 'ticket';
+  rerender();
+  flashToast('Vente enregistrée hors ligne — sera synchronisée au retour de la connexion.');
+}
 async function checkout() {
   if (state.cart.length === 0) return;
   if (state.paymentMethod === 'Crédit' && !state.posClientId) {
     flashToast('Sélectionnez un client pour une vente à crédit');
     return;
   }
+  if (state.offlineMode || !navigator.onLine) { checkoutOffline(); return; }
   try {
     const data = await api('POST', '/api/checkout', {
       cart: state.cart, clientId: state.posClientId, paymentMethod: state.paymentMethod, cashier: state.userName, depotId: state.currentDepotId,
       advance: state.paymentMethod === 'Crédit' ? (Number(state.posAdvance) || 0) : undefined,
     });
-    const sale = data.sale;
-    sale.items.forEach((it) => {
-      const p = state.products.find((pp) => pp.id === it.productId);
-      if (p) { p.stockByDepot[sale.depotId] = stockAt(p, sale.depotId) - it.baseQty; p.sold += it.baseQty; }
-    });
-    if (sale.clientId) {
-      const c = state.clients.find((cc) => cc.id === sale.clientId);
-      if (c) { c.points += Math.floor(sale.total / 100); c.totalSpent += sale.total; }
-    }
-    state.sales.unshift(sale);
+    applySaleLocally(data.sale);
     state.cart = []; state.posClientId = ''; state.posAdvance = '';
-    state.lastReceipt = sale; state.showReceipt = true; state.receiptView = 'ticket';
+    state.lastReceipt = data.sale; state.showReceipt = true; state.receiptView = 'ticket';
     rerender();
   } catch (e) {
+    if (e.isNetworkError) { checkoutOffline(); return; }
     flashToast(e.message || "Erreur lors de l'encaissement");
     rerender();
   }
+}
+// Flushes the offline outbox to the server. Deliberately uses fetch()
+// directly rather than the shared api() helper: api() auto-logs-out on any
+// 401, which would be exactly wrong here — an expired cached token during a
+// background sync attempt must never wipe state.sales/state.products out
+// from under a mid-shift cashier, and must never risk the outbox itself.
+// Triggered by the browser's `online` event, a periodic retry (the `online`
+// event alone isn't fully reliable), a manual "Synchroniser" action, and
+// automatically at the tail of every successful online login.
+async function syncOfflineSales() {
+  const outbox = getOutbox();
+  if (outbox.length === 0 || !authToken) return;
+  let res;
+  try {
+    res = await fetch('/api/sync/offline-sales', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + authToken },
+      body: JSON.stringify({ sales: outbox }),
+    });
+  } catch (e) {
+    return; // still unreachable — a later trigger will retry, outbox untouched
+  }
+  if (res.status === 401) {
+    state.offlineSyncBlocked = true;
+    rerender();
+    return; // outbox untouched — retried automatically after the next successful login
+  }
+  if (!res.ok) return; // unexpected server-side failure — leave the outbox intact, retry later
+  const count = outbox.length;
+  setOutbox([]);
+  state.offlineSyncBlocked = false;
+  await loadAppState(); // authoritative reconciliation, rather than hand-patching local state
+  flashToast(count === 1 ? '1 vente hors ligne synchronisée' : count + ' ventes hors ligne synchronisées');
+  rerender();
 }
 
 // ---------- Barcode scanning ----------
@@ -820,6 +1019,11 @@ function toggleEmployeeActive(id) {
 }
 
 // ---------- Rendering ----------
+function renderOfflineLoginLink() {
+  if (!hasOfflineSnapshot()) return '';
+  const snap = loadOfflineSnapshot();
+  return `<div class="login-offline-link" data-action="workOffline">Travailler hors ligne${snap && snap.userName ? ` (${esc(snap.userName)})` : ''}</div>`;
+}
 function renderLogin() {
   const brandHtml = `<div class="login-brand"><div class="login-logo">N</div><div class="login-title">NassuaGroup</div></div>
     <div class="login-sub">Gestionnaire Magasin</div>`;
@@ -832,6 +1036,7 @@ function renderLogin() {
         <div class="login-btn manager" data-action="chooseLoginMode" data-mode="manager">Gérant</div>
         <div class="login-btn cashier" data-action="chooseLoginMode" data-mode="cashier">Caissier</div>
       </div>
+      ${renderOfflineLoginLink()}
     </div></div>`;
   }
 
@@ -847,6 +1052,7 @@ function renderLogin() {
       <div class="login-btn manager" data-action="submitLogin">Se connecter</div>
       <div class="login-back" data-action="backToRoleSelect">← Choisir un autre rôle</div>
     </div>
+    ${renderOfflineLoginLink()}
   </div></div>`;
 }
 
@@ -913,6 +1119,21 @@ function renderDepotFilter(bind, allowAll) {
   return `<select id="field-${bind}" class="field" data-bind="${bind}">${opts}</select>`;
 }
 
+// Shown whenever there's something offline-related worth a cashier
+// noticing: currently in offline mode, sales still queued (even if back
+// online — the sync just hasn't run yet), or a sync blocked on an expired
+// cached token. Clicking it manually retries the sync.
+function renderOfflineChip() {
+  const pending = getOutbox().length;
+  if (!state.offlineMode && pending === 0 && !state.offlineSyncBlocked) return '';
+  if (state.offlineSyncBlocked) {
+    return `<div class="offline-chip blocked" data-action="syncOfflineNow" title="Reconnectez-vous pour synchroniser">⚠ Reconnexion requise (${pending})</div>`;
+  }
+  const label = state.offlineMode
+    ? `● Mode hors ligne${pending ? ` · ${pending} en attente` : ''}`
+    : `${pending} vente(s) en attente · Synchroniser`;
+  return `<div class="offline-chip" data-action="syncOfflineNow" title="Synchroniser maintenant">${label}</div>`;
+}
 function renderTopbar() {
   const t = TITLES[state.screen] || TITLES.dashboard;
   const today = new Date().toLocaleDateString('fr-FR', { weekday: 'long', day: 'numeric', month: 'long' });
@@ -921,7 +1142,7 @@ function renderTopbar() {
       <div class="menu-toggle" data-action="toggleMobileNav" aria-label="Menu">${ICON_MENU}</div>
       <div style="min-width:0"><div class="topbar-title">${t[0]}</div><div class="topbar-subtitle">${t[1]}</div></div>
     </div>
-    <div style="display:flex;align-items:center;gap:16px"><div class="topbar-date">${esc(today)}</div></div>
+    <div style="display:flex;align-items:center;gap:16px">${renderOfflineChip()}<div class="topbar-date">${esc(today)}</div></div>
   </div>`;
 }
 
@@ -1941,7 +2162,7 @@ function renderReceiptModal() {
   return `<div class="modal-overlay">
     <div class="modal-card receipt-modal${isInvoice ? ' invoice-mode' : ''}">
       <div class="modal-header no-print">
-        <div class="modal-title">${isInvoice ? 'Facture (A4)' : 'Reçu de vente'}</div>
+        <div class="modal-title">${isInvoice ? 'Facture (A4)' : 'Reçu de vente'}${r.pending ? ' <span class="badge warning" style="margin-left:8px">En attente de synchronisation</span>' : ''}</div>
         <div style="display:flex;align-items:center;gap:14px">
           <span style="cursor:pointer;color:var(--green);font-size:12.5px;font-weight:600" data-action="toggleReceiptView">${isInvoice ? '← Voir le reçu' : 'Voir la facture A4'}</span>
           <div class="modal-close" data-action="closeReceipt">×</div>
@@ -1978,6 +2199,8 @@ const Actions = {
   backToRoleSelect: () => { state.loginMode = null; state.loginUsername = ''; state.loginPassword = ''; state.loginError = null; rerender(); },
   submitLogin: () => submitLogin(),
   logout: () => logout(),
+  workOffline: () => workOffline(),
+  syncOfflineNow: () => syncOfflineSales(),
   nav: (ds) => { state.screen = ds.screen; state.pwError = null; state.pwSuccess = null; state.confirmDeleteEmployeeId = null; state.confirmDeleteProductId = null; state.mobileNavOpen = false; rerender(); },
   toggleMobileNav: () => { state.mobileNavOpen = !state.mobileNavOpen; rerender(); },
   closeMobileNav: () => { state.mobileNavOpen = false; rerender(); },
@@ -2174,5 +2397,13 @@ async function boot() {
   // nothing to show before login anyway. loadAppState() runs after
   // submitLogin() succeeds instead.
   rerender();
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.register('/sw.js').catch(() => {});
+  }
+  window.addEventListener('online', () => syncOfflineSales());
+  // The browser's `online` event isn't fully reliable (e.g. a flaky
+  // connection can reconnect without firing it) — a periodic check is the
+  // backstop. No-ops instantly whenever the outbox is empty.
+  setInterval(() => syncOfflineSales(), 30000);
 }
 boot();
