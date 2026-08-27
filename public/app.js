@@ -240,33 +240,56 @@ async function api(method, url, body) {
 
 // ---------- Offline mode ----------
 // Caisse-only (see checkout()/syncOfflineSales() below). Two localStorage
-// keys: OFFLINE_SNAPSHOT_KEY holds enough of the last online session to
-// resume as that employee without a password (an explicit, informed
-// trade-off — see project notes); OFFLINE_OUTBOX_KEY holds sales made while
+// keys: OFFLINE_SNAPSHOT_KEY holds one resumable snapshot PER EMPLOYEE who
+// has ever logged in online on this device — keyed by the normalized
+// username/phone they typed at login — so a shared till device can offer
+// each cashier their own identity offline instead of only whoever happened
+// to log in most recently (a real bug found by testing: a cashier trying to
+// resume offline was only ever offered a manager's cached session because
+// the manager had logged in online last on that machine). Each entry lets
+// that one employee resume without a password (an explicit, informed
+// trade-off — see project notes). OFFLINE_OUTBOX_KEY holds sales made while
 // offline, pending sync, and is never cleared by logout() (losing a
 // recorded sale would be a real bug, not just a UX rough edge).
 const OFFLINE_SNAPSHOT_KEY = 'bm_offline_snapshot';
 const OFFLINE_OUTBOX_KEY = 'bm_offline_outbox';
-function saveOfflineSnapshot() {
-  try {
-    localStorage.setItem(OFFLINE_SNAPSHOT_KEY, JSON.stringify({
-      token: authToken, userId: state.userId, userName: state.userName, role: state.role, depotId: state.currentDepotId,
-      products: state.products, categories: state.categories, clients: state.clients, depots: state.depots,
-      savedAt: new Date().toISOString(),
-    }));
-  } catch (e) {}
+function normalizeLoginKey(username) {
+  return String(username || '').trim().toLowerCase();
 }
-function loadOfflineSnapshot() {
+function loadOfflineSnapshots() {
   try {
     const raw = localStorage.getItem(OFFLINE_SNAPSHOT_KEY);
-    return raw ? JSON.parse(raw) : null;
-  } catch (e) { return null; }
+    const parsed = raw ? JSON.parse(raw) : {};
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch (e) { return {}; }
 }
-function clearOfflineSnapshot() {
-  try { localStorage.removeItem(OFFLINE_SNAPSHOT_KEY); } catch (e) {}
+function saveOfflineSnapshot(username) {
+  try {
+    const all = loadOfflineSnapshots();
+    all[normalizeLoginKey(username)] = {
+      username, token: authToken, userId: state.userId, userName: state.userName, role: state.role, depotId: state.currentDepotId,
+      products: state.products, categories: state.categories, clients: state.clients, depots: state.depots,
+      savedAt: new Date().toISOString(),
+    };
+    localStorage.setItem(OFFLINE_SNAPSHOT_KEY, JSON.stringify(all));
+  } catch (e) {}
+}
+function loadOfflineSnapshot(username) {
+  return loadOfflineSnapshots()[normalizeLoginKey(username)] || null;
+}
+// Removes only this employee's own cached entries (matched by userId, since
+// they may have logged in under slightly different strings — phone vs.
+// name) — other cashiers' cached offline identities on a shared device must
+// survive one person's logout.
+function clearOfflineSnapshot(userId) {
+  try {
+    const all = loadOfflineSnapshots();
+    Object.keys(all).forEach((k) => { if (all[k].userId === userId) delete all[k]; });
+    localStorage.setItem(OFFLINE_SNAPSHOT_KEY, JSON.stringify(all));
+  } catch (e) {}
 }
 function hasOfflineSnapshot() {
-  return !!loadOfflineSnapshot();
+  return Object.keys(loadOfflineSnapshots()).length > 0;
 }
 function getOutbox() {
   try {
@@ -343,7 +366,7 @@ async function submitLogin() {
     state.currentDepotId = depotId;
     state.stockDepotFilter = depotId; state.dashDepotFilter = depotId; state.repDepotFilter = depotId; state.expenseDepotFilter = depotId;
     state.npDepotId = depotId; state.neDepotId = depotId; state.exDepotId = depotId;
-    saveOfflineSnapshot();
+    saveOfflineSnapshot(username);
     rerender();
     // Fire-and-forget: a fresh online login is exactly the moment to flush
     // any sales queued during a prior offline session on this device.
@@ -354,11 +377,13 @@ async function submitLogin() {
     rerender();
   }
 }
-// "Travailler hors ligne": resumes the last successful online login on this
-// device from OFFLINE_SNAPSHOT_KEY, with no password (there's no way to
-// verify one without the server) — an explicit, user-requested trade-off.
-function workOffline() {
-  const snap = loadOfflineSnapshot();
+// "Travailler hors ligne": resumes ONE specific employee's last successful
+// online login on this device (matched by the normalized username/phone
+// they logged in with — see OFFLINE_SNAPSHOT_KEY above), with no password
+// (there's no way to verify one without the server) — an explicit,
+// user-requested trade-off.
+function workOffline(key) {
+  const snap = loadOfflineSnapshot(key);
   if (!snap) return;
   authToken = snap.token;
   state.loggedIn = true; state.offlineMode = true;
@@ -377,6 +402,7 @@ function logout() {
   }
   if (authToken && !state.offlineMode) api('POST', '/api/logout').catch(() => {});
   authToken = null;
+  const loggedOutUserId = state.userId;
   state.loggedIn = false; state.role = null; state.userName = ''; state.userId = null; state.screen = 'dashboard'; state.cart = [];
   state.offlineMode = false;
   state.loginMode = null; state.loginUsername = ''; state.loginPassword = ''; state.loginError = null;
@@ -384,7 +410,7 @@ function logout() {
   // never shows one user's data after another logs in on the same browser.
   state.depots = []; state.categories = []; state.suppliers = []; state.products = [];
   state.clients = []; state.employees = []; state.sales = []; state.expenses = [];
-  clearOfflineSnapshot();
+  clearOfflineSnapshot(loggedOutUserId); // only this employee's cached entry — others on a shared device stay usable offline
   rerender();
 }
 async function changePassword() {
@@ -1019,10 +1045,17 @@ function toggleEmployeeActive(id) {
 }
 
 // ---------- Rendering ----------
+// Lists every employee who has ever logged in online on this device — not
+// just whoever did so most recently — so a shared till can offer each
+// cashier their own cached identity instead of only a manager's (a real bug
+// found by testing: only the last online login was ever cached, so anyone
+// else trying to resume offline was silently offered someone else's name).
 function renderOfflineLoginLink() {
-  if (!hasOfflineSnapshot()) return '';
-  const snap = loadOfflineSnapshot();
-  return `<div class="login-offline-link" data-action="workOffline">Travailler hors ligne${snap && snap.userName ? ` (${esc(snap.userName)})` : ''}</div>`;
+  const all = loadOfflineSnapshots();
+  const keys = Object.keys(all);
+  if (keys.length === 0) return '';
+  const rows = keys.map((k) => `<div class="login-offline-link" data-action="workOffline" data-key="${esc(k)}">Travailler hors ligne (${esc(all[k].userName || k)})</div>`).join('');
+  return `<div class="login-offline-list">${rows}</div>`;
 }
 function renderLogin() {
   const brandHtml = `<div class="login-brand"><div class="login-logo">N</div><div class="login-title">NassuaGroup</div></div>
@@ -2199,7 +2232,7 @@ const Actions = {
   backToRoleSelect: () => { state.loginMode = null; state.loginUsername = ''; state.loginPassword = ''; state.loginError = null; rerender(); },
   submitLogin: () => submitLogin(),
   logout: () => logout(),
-  workOffline: () => workOffline(),
+  workOffline: (ds) => workOffline(ds.key),
   syncOfflineNow: () => syncOfflineSales(),
   nav: (ds) => { state.screen = ds.screen; state.pwError = null; state.pwSuccess = null; state.confirmDeleteEmployeeId = null; state.confirmDeleteProductId = null; state.mobileNavOpen = false; rerender(); },
   toggleMobileNav: () => { state.mobileNavOpen = !state.mobileNavOpen; rerender(); },
