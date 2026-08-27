@@ -404,8 +404,14 @@ function publicEmployee(e) {
   const { passwordHash, passwordSalt, ...rest } = e;
   return rest;
 }
-function publicState(db) {
-  return Object.assign({}, db, { employees: db.employees.map(publicEmployee), fneConfig: publicFneConfig(db) });
+// isManager gates db.expenses (contains Salaires/payroll entries) out of the
+// payload for cashiers — the Dépenses nav screen is already hidden from them
+// client-side, but /api/state used to send the raw data anyway to anyone with
+// valid cashier credentials.
+function publicState(db, isManager) {
+  const state = Object.assign({}, db, { employees: db.employees.map(publicEmployee), fneConfig: publicFneConfig(db) });
+  if (!isManager) state.expenses = [];
+  return state;
 }
 // Finds which tenant a login username (phone or name, case-insensitive)
 // belongs to. Login has no separate "shop code" field by design — phone
@@ -568,7 +574,7 @@ async function handleApi(req, res, pathname) {
   }
 
   if (pathname === '/api/state' && method === 'GET') {
-    return sendJSON(res, 200, publicState(db));
+    return sendJSON(res, 200, publicState(db, isManager));
   }
 
   if (pathname === '/api/change-password' && method === 'POST') {
