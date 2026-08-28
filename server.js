@@ -373,18 +373,34 @@ function sendJSON(res, status, data) {
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' });
   res.end(body);
 }
-function readJSONBody(req) {
+// maxBytes defaults to 1MB, plenty for every normal request body in this
+// app; POST /api/products/import passes a higher cap since a few thousand
+// rows of repeated-key JSON (categoryName, supplierName, stockByDepotName
+// per row) can plausibly exceed that even though the same data as compact
+// CSV wouldn't. Overflow used to just req.destroy() — a dead connection
+// with no client-visible error. Rejecting as soon as the limit is hit
+// doesn't actually fix that: Node destroys a keep-alive socket itself
+// whenever a response ends before its request body has been fully read
+// (it has no way to safely reuse the socket otherwise), so the client
+// still just sees a reset. The fix is to keep draining and discarding
+// incoming chunks (bounded memory — `chunks` is only reset once, not
+// left growing) until the real `end` event, and only reject then, so the
+// request is always fully consumed before sendJSON's response goes out.
+function readJSONBody(req, maxBytes = 1e6) {
   return new Promise((resolve, reject) => {
     let chunks = '';
+    let overflowed = false;
     req.on('data', (c) => {
+      if (overflowed) return;
       chunks += c;
-      if (chunks.length > 1e6) req.destroy();
+      if (chunks.length > maxBytes) { overflowed = true; chunks = ''; }
     });
     req.on('end', () => {
+      if (overflowed) return reject(new Error('Fichier trop volumineux'));
       if (!chunks) return resolve({});
       try { resolve(JSON.parse(chunks)); } catch (e) { reject(e); }
     });
-    req.on('error', reject);
+    req.on('error', (e) => { if (!overflowed) reject(e); });
   });
 }
 function stockAt(product, depotId) {
@@ -713,6 +729,10 @@ async function handleApi(req, res, pathname) {
     pathname === '/api/fne/config' && method === 'PATCH',
     /^\/api\/employees\/[^/]+(\/toggle)?$/.test(pathname) && method !== 'GET',
     /^\/api\/products\/[^/]+$/.test(pathname) && method === 'DELETE',
+    // Bulk create/update plus auto-creating categories/suppliers as a side
+    // effect is more structurally impactful than a single product add/edit
+    // (which stays open to both roles) — same reasoning as DELETE above.
+    pathname === '/api/products/import' && method === 'POST',
   ].some(Boolean);
   if (MANAGER_ONLY && !isManager) {
     return sendJSON(res, 403, { error: 'Action réservée au Gérant' });
@@ -926,6 +946,163 @@ async function handleApi(req, res, pathname) {
     db.products = db.products.filter((p) => p.id !== product.id);
     saveTenant(session.tenantId);
     return sendJSON(res, 200, { ok: true });
+  }
+
+  if (pathname === '/api/products/import' && method === 'POST') {
+    const body = await readJSONBody(req, 8e6);
+    const rows = Array.isArray(body.rows) ? body.rows : [];
+    const byName = (list) => (name) => {
+      const key = String(name || '').trim().toLowerCase();
+      if (!key) return null;
+      return list.find((x) => x.name.trim().toLowerCase() === key) || null;
+    };
+    const findCategory = byName(db.categories);
+    const findSupplier = byName(db.suppliers);
+    const findDepot = byName(db.depots);
+
+    // Depot-column mismatches are collected once (by name, not per-row) so a
+    // typo'd "Stock <Depot>" header is surfaced rather than silently
+    // discarding that column's data for every row with zero trace.
+    const unmatchedDepotNames = new Set();
+    rows.forEach((r) => {
+      Object.keys(r.stockByDepotName || {}).forEach((depotName) => {
+        if (!findDepot(depotName)) unmatchedDepotNames.add(depotName);
+      });
+    });
+
+    let created = 0, updated = 0;
+    const errors = [];
+
+    rows.forEach((row, idx) => {
+      try {
+        // Name is only required to CREATE a product — an update row (valid
+        // ID) may reasonably touch just price/stock/etc. and leave the name
+        // column blank, same "blank = untouched" rule as every other field.
+        // Resolving id-vs-not comes before the name check for exactly this
+        // reason (a naive "require name unconditionally, then resolve id"
+        // ordering would wrongly reject a perfectly valid partial-update row).
+        let product = null;
+        const rowId = String(row.id || '').trim();
+        if (rowId) {
+          product = db.products.find((p) => p.id === rowId);
+          if (!product) throw new Error('ID inconnu — laissez la colonne ID vide pour créer un nouveau produit');
+        }
+        const name = String(row.name || '').trim();
+        if (!product && !name) throw new Error('Nom requis');
+
+        // Bulk import deliberately REJECTS a bad numeric cell rather than
+        // silently coercing it to 0 like the single-product form does
+        // (Number(x) || 0) — that's fine for one field typed by hand, but
+        // would silently zero out a garbled price across a whole file here.
+        const parseNum = (val, label) => {
+          if (val === undefined || val === null || val === '') return undefined;
+          const n = Number(val);
+          if (!Number.isFinite(n) || n < 0) throw new Error(`${label} invalide`);
+          return n;
+        };
+        const price = parseNum(row.price, 'Prix vente');
+        const cost = parseNum(row.cost, 'Prix achat');
+        const minStock = parseNum(row.minStock, 'Stock minimum');
+        const unitsPerPack = parseNum(row.unitsPerPack, 'Unités/Paquet');
+        const pricePerPack = parseNum(row.pricePerPack, 'Prix Paquet');
+        const unitsPerCarton = parseNum(row.unitsPerCarton, 'Unités/Carton');
+        const pricePerCarton = parseNum(row.pricePerCarton, 'Prix Carton');
+
+        const barcode = row.barcode !== undefined ? String(row.barcode).trim() : undefined;
+        if (barcode) {
+          const clash = db.products.find((p) => p.barcode === barcode && (!product || p.id !== product.id));
+          if (clash) throw new Error('Ce code-barres est déjà utilisé par un autre produit');
+        }
+
+        // Category/supplier are resolved (and auto-created) LAST, only once
+        // every other validation on this row has already passed — a row
+        // that fails for some other reason should never leave an orphan
+        // category/supplier behind just because it also named a new one.
+        let categoryId, supplierId;
+        if (row.categoryName !== undefined && String(row.categoryName).trim()) {
+          let cat = findCategory(row.categoryName);
+          if (!cat) {
+            cat = { id: uid('c'), name: String(row.categoryName).trim(), color: CAT_PALETTE[db.categories.length % CAT_PALETTE.length] };
+            db.categories.push(cat);
+          }
+          categoryId = cat.id;
+        }
+        if (row.supplierName !== undefined && String(row.supplierName).trim()) {
+          let sup = findSupplier(row.supplierName);
+          if (!sup) {
+            sup = { id: uid('s'), name: String(row.supplierName).trim(), phone: '', email: '' };
+            db.suppliers.push(sup);
+          }
+          supplierId = sup.id;
+        }
+
+        if (product) {
+          // Update: every field is independently optional, same convention
+          // as PATCH /api/products/:id — a blank cell means "leave this
+          // untouched," never "clear it," so a routine "bulk-update prices
+          // only" re-import can't silently wipe stock or packaging.
+          if (name) product.name = name;
+          if (barcode) product.barcode = barcode;
+          if (categoryId !== undefined) product.categoryId = categoryId;
+          if (supplierId !== undefined) product.supplierId = supplierId;
+          if (price !== undefined) product.price = price;
+          if (cost !== undefined) product.cost = cost;
+          if (minStock !== undefined) product.minStock = minStock;
+          if (unitsPerPack !== undefined) product.unitsPerPack = unitsPerPack;
+          if (pricePerPack !== undefined) product.pricePerPack = pricePerPack;
+          if (unitsPerCarton !== undefined) product.unitsPerCarton = unitsPerCarton;
+          if (pricePerCarton !== undefined) product.pricePerCarton = pricePerCarton;
+          Object.keys(row.stockByDepotName || {}).forEach((depotName) => {
+            const val = row.stockByDepotName[depotName];
+            if (val === undefined || val === null || val === '') return; // blank = untouched
+            const depot = findDepot(depotName);
+            if (!depot) return; // already reported once in `warnings`
+            const qty = Number(val);
+            if (!Number.isFinite(qty) || qty < 0) throw new Error(`Stock ${depotName} invalide`);
+            product.stockByDepot[depot.id] = qty;
+          });
+          updated++;
+        } else {
+          const stockByDepot = {};
+          db.depots.forEach((d) => { stockByDepot[d.id] = 0; });
+          Object.keys(row.stockByDepotName || {}).forEach((depotName) => {
+            const depot = findDepot(depotName);
+            if (!depot) return;
+            const val = row.stockByDepotName[depotName];
+            const qty = val === undefined || val === null || val === '' ? 0 : Number(val);
+            if (!Number.isFinite(qty) || qty < 0) throw new Error(`Stock ${depotName} invalide`);
+            stockByDepot[depot.id] = qty;
+          });
+          db.products.push({
+            id: uid('p'), name,
+            categoryId: categoryId || (db.categories[0] && db.categories[0].id) || '',
+            supplierId: supplierId || (db.suppliers[0] && db.suppliers[0].id) || '',
+            price: price || 0, cost: cost || 0, stockByDepot,
+            minStock: minStock === undefined ? 10 : minStock,
+            sold: 0,
+            barcode: barcode || uid('bc').slice(0, 13),
+            unitsPerPack: unitsPerPack || 0, pricePerPack: pricePerPack || 0,
+            unitsPerCarton: unitsPerCarton || 0, pricePerCarton: pricePerCarton || 0,
+          });
+          created++;
+        }
+      } catch (e) {
+        // Row-scoped: anything thrown here — a validation error above, or
+        // anything unexpected — becomes a row error and processing moves on
+        // to the next row, rather than aborting the whole request. Without
+        // this, an unhandled exception mid-loop would leave already-applied
+        // mutations sitting in memory but never saved, until some unrelated
+        // later request happened to call saveTenant() and silently flush a
+        // batch the client was told had failed.
+        errors.push({ row: idx + 1, error: e.message || 'Erreur inconnue' });
+      }
+    });
+
+    if (created + updated > 0) saveTenant(session.tenantId);
+    return sendJSON(res, 200, {
+      created, updated, errors,
+      warnings: [...unmatchedDepotNames].map((n) => `Colonne "Stock ${n}" ignorée — aucun dépôt de ce nom`),
+    });
   }
 
   const stockMatch = pathname.match(/^\/api\/products\/([^/]+)\/stock$/);

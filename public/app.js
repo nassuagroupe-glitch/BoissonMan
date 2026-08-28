@@ -102,6 +102,7 @@ const state = {
   npName: '', npBarcode: '', npCategoryId: '', npSupplierId: '', npDepotId: '', npPrice: '', npCost: '', npStock: '', npMinStock: '',
   npUnitsPerPack: '', npPricePerPack: '', npUnitsPerCarton: '', npPricePerCarton: '', editingProductId: null,
   confirmDeleteProductId: null,
+  showImportPreview: false, impFileName: '', impRows: [], impNewCount: 0, impUpdateCount: 0, impParseErrors: [], impResult: null, impBusy: false,
   showAddCategory: false, ncName: '',
   showAddSupplier: false, nsName: '', nsPhone: '', nsEmail: '',
   showAddClient: false, ncliName: '', ncliPhone: '', ncliNcc: '',
@@ -817,6 +818,171 @@ async function deleteProduct(id) {
     rerender();
   }
 }
+// ---------- Product CSV import/export ----------
+// Delimiter is ';' (not ',') and the export is BOM-prefixed: French-locale
+// Excel (this app's audience) treats ',' as the decimal separator and
+// expects ';'-delimited CSVs by default — a comma-delimited export would
+// dump every row into one Excel column on open. The BOM is needed for
+// accented characters (é, à, ô — this whole app is French) to render
+// correctly instead of mojibake.
+const CSV_DELIMITER = ';';
+const PRODUCT_CSV_COLUMNS = ['ID', 'Nom', 'Catégorie', 'Fournisseur', 'Prix vente', 'Prix achat', 'Stock minimum', 'Code-barres', 'Unités/Paquet', 'Prix Paquet', 'Unités/Carton', 'Prix Carton'];
+function csvEscape(cell) {
+  const s = cell === undefined || cell === null ? '' : String(cell);
+  if (s.includes(CSV_DELIMITER) || s.includes(',') || s.includes('"') || s.includes('\n') || s.includes('\r')) {
+    return '"' + s.replace(/"/g, '""') + '"';
+  }
+  return s;
+}
+function buildProductsCsv() {
+  const catById = {}; state.categories.forEach((c) => { catById[c.id] = c.name; });
+  const supById = {}; state.suppliers.forEach((s) => { supById[s.id] = s.name; });
+  const depotCols = state.depots.map((d) => 'Stock ' + d.name);
+  const header = PRODUCT_CSV_COLUMNS.concat(depotCols);
+  const lines = [header.map(csvEscape).join(CSV_DELIMITER)];
+  state.products.forEach((p) => {
+    const row = [
+      p.id, p.name, catById[p.categoryId] || '', supById[p.supplierId] || '',
+      p.price, p.cost, p.minStock, p.barcode,
+      p.unitsPerPack || '', p.pricePerPack || '', p.unitsPerCarton || '', p.pricePerCarton || '',
+    ];
+    state.depots.forEach((d) => row.push(stockAt(p, d.id)));
+    lines.push(row.map(csvEscape).join(CSV_DELIMITER));
+  });
+  return lines.join('\r\n');
+}
+function exportProductsCsv() {
+  const csv = '﻿' + buildProductsCsv();
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = 'produits.csv';
+  a.click();
+  URL.revokeObjectURL(url);
+  flashToast('Export CSV téléchargé (' + state.products.length + ' produits)');
+}
+// Real character-state-machine parser (not a naive split) so quoted cells
+// containing the delimiter/a quote/a newline round-trip correctly, and a
+// hand-edited file doesn't silently corrupt. Auto-detects ';' vs ',' from
+// the header line (whichever is more frequent) and strips a leading BOM —
+// both needed so re-importing this app's OWN export works: without BOM
+// stripping the header's first cell would literally read "﻿ID" and
+// every header-name match below would silently fail.
+function parseCsv(text) {
+  if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
+  const headerLineEnd = text.search(/\r\n|\n|\r/);
+  const headerLine = headerLineEnd === -1 ? text : text.slice(0, headerLineEnd);
+  const semiCount = (headerLine.match(/;/g) || []).length;
+  const commaCount = (headerLine.match(/,/g) || []).length;
+  const delimiter = semiCount >= commaCount ? ';' : ',';
+
+  const rows = [];
+  let row = [], cell = '', inQuotes = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (inQuotes) {
+      if (c === '"') {
+        if (text[i + 1] === '"') { cell += '"'; i++; } else { inQuotes = false; }
+      } else cell += c;
+    } else if (c === '"') {
+      inQuotes = true;
+    } else if (c === delimiter) {
+      row.push(cell); cell = '';
+    } else if (c === '\n' || c === '\r') {
+      if (c === '\r' && text[i + 1] === '\n') i++;
+      row.push(cell); cell = '';
+      rows.push(row); row = [];
+    } else {
+      cell += c;
+    }
+  }
+  if (cell !== '' || row.length) { row.push(cell); rows.push(row); }
+  const nonEmpty = rows.filter((r) => !(r.length === 1 && r[0].trim() === ''));
+  if (nonEmpty.length === 0) return [];
+  const headers = nonEmpty[0].map((h) => h.trim());
+  return nonEmpty.slice(1).map((r) => {
+    const obj = {};
+    headers.forEach((h, i) => { obj[h] = r[i] !== undefined ? r[i].trim() : ''; });
+    return obj;
+  }).map((obj) => ({ __delimiter: delimiter, ...obj }));
+}
+// French-locale cells (';'-delimited files) use ',' as the decimal
+// separator ("1500,50") and sometimes a space/NBSP as a thousands
+// separator ("1 500,50") — both need stripping before Number() works.
+function parseImportNumber(str, delimiter) {
+  if (str === undefined || str === null || String(str).trim() === '') return undefined;
+  let s = String(str).trim();
+  if (delimiter === ';') s = s.replace(/[\s ]/g, '').replace(',', '.');
+  const n = Number(s);
+  return Number.isFinite(n) ? n : NaN;
+}
+function rowsToImportPayload(parsedRows, depots) {
+  let newCount = 0, updateCount = 0;
+  const parseErrors = [];
+  const payload = [];
+  parsedRows.forEach((r, idx) => {
+    const delimiter = r.__delimiter;
+    const id = (r['ID'] || '').trim();
+    if (id) updateCount++; else newCount++;
+    // Name is only required to create a new product — an update row (ID
+    // present) may leave it blank to mean "don't change the name," same as
+    // every other optional column (matches server.js's own rule).
+    if (!id && !(r['Nom'] || '').trim()) { parseErrors.push('Ligne ' + (idx + 2) + ' : nom manquant (obligatoire pour un nouveau produit)'); return; }
+    const stockByDepotName = {};
+    depots.forEach((d) => {
+      const col = 'Stock ' + d.name;
+      if (r[col] !== undefined && r[col] !== '') stockByDepotName[d.name] = r[col];
+    });
+    payload.push({
+      id, name: r['Nom'], categoryName: r['Catégorie'], supplierName: r['Fournisseur'],
+      price: parseImportNumber(r['Prix vente'], delimiter), cost: parseImportNumber(r['Prix achat'], delimiter),
+      minStock: parseImportNumber(r['Stock minimum'], delimiter), barcode: r['Code-barres'],
+      unitsPerPack: parseImportNumber(r['Unités/Paquet'], delimiter), pricePerPack: parseImportNumber(r['Prix Paquet'], delimiter),
+      unitsPerCarton: parseImportNumber(r['Unités/Carton'], delimiter), pricePerCarton: parseImportNumber(r['Prix Carton'], delimiter),
+      stockByDepotName,
+    });
+  });
+  return { payload, newCount, updateCount, parseErrors };
+}
+function handleImportCsvFile(file) {
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    const parsed = parseCsv(String(reader.result));
+    const { payload, newCount, updateCount, parseErrors } = rowsToImportPayload(parsed, state.depots);
+    state.impFileName = file.name;
+    state.impRows = payload;
+    state.impNewCount = newCount;
+    state.impUpdateCount = updateCount;
+    state.impParseErrors = parseErrors;
+    state.impResult = null;
+    state.showImportPreview = true;
+    rerender();
+  };
+  reader.readAsText(file, 'utf-8');
+}
+async function confirmImportProducts() {
+  state.impBusy = true;
+  rerender();
+  try {
+    const result = await api('POST', '/api/products/import', { rows: state.impRows });
+    await loadAppState(); // category/supplier auto-create touches more than state.products — full resync is simplest and safe
+    state.impResult = result;
+    state.impBusy = false;
+    flashToast(result.created + ' créé(s), ' + result.updated + ' mis à jour' + (result.errors.length ? ', ' + result.errors.length + ' ignoré(s)' : ''));
+    rerender();
+  } catch (e) {
+    state.impBusy = false;
+    flashToast(e.message || "Erreur lors de l'import");
+    rerender();
+  }
+}
+function closeImportPreview() {
+  state.showImportPreview = false; state.impFileName = ''; state.impRows = [];
+  state.impNewCount = 0; state.impUpdateCount = 0; state.impParseErrors = []; state.impResult = null;
+  rerender();
+}
+
 async function stockTransfer() {
   if (!state.trProductId || !state.trFromDepotId || !state.trToDepotId) return;
   if (state.trFromDepotId === state.trToDepotId) { flashToast('Choisissez deux dépôts différents'); return; }
@@ -1127,6 +1293,7 @@ function renderShell() {
     ${renderScannerModal()}
     ${renderUnitPickerModal()}
     ${renderReceiptModal()}
+    ${renderImportPreviewModal()}
     ${renderToastEl()}
   </div>`;
 }
@@ -1436,6 +1603,9 @@ function renderStocks() {
       <div style="display:flex;gap:10px">
         ${state.depots.length > 1 && state.role === 'manager' ? `<div class="add-btn" style="background:#fff;color:var(--green);border:1px solid var(--border)" data-action="toggleTransfer">⇄ Transférer du stock</div>` : ''}
         <div class="add-btn" style="background:#fff;color:var(--green);border:1px solid var(--border)" data-action="toggleRestock">↓ Réapprovisionner</div>
+        <div class="add-btn" style="background:#fff;color:var(--green);border:1px solid var(--border)" data-action="exportProductsCsv" title="Télécharger le catalogue en CSV">↓ Exporter CSV</div>
+        ${state.role === 'manager' ? `<div class="add-btn" style="background:#fff;color:var(--green);border:1px solid var(--border)" data-action="triggerImportFile" title="Importer un fichier CSV">↑ Importer CSV</div>
+        <input id="field-impFile" type="file" accept=".csv,text/csv" data-bind="impFile" style="display:none" />` : ''}
         <div class="add-btn" data-action="toggleAddProduct">+ Ajouter un produit</div>
       </div>
     </div>
@@ -1449,6 +1619,42 @@ function renderStocks() {
   </div>`;
 }
 
+function renderImportPreviewModal() {
+  if (!state.showImportPreview) return '';
+  const r = state.impResult;
+  if (r) {
+    const errorsHtml = r.errors.length
+      ? `<div style="max-height:180px;overflow-y:auto;margin-top:10px;font-size:12px;color:var(--danger)">${r.errors.map((e) => `Ligne ${e.row} : ${esc(e.error)}`).join('<br/>')}</div>` : '';
+    const warningsHtml = r.warnings.length
+      ? `<div style="margin-top:10px;font-size:12px;color:var(--warning)">${r.warnings.map(esc).join('<br/>')}</div>` : '';
+    return `<div class="modal-overlay">
+      <div class="modal-card" style="width:440px">
+        <div class="modal-header"><div class="modal-title">Résultat de l'import</div><div class="modal-close" data-action="closeImportPreview">×</div></div>
+        <div class="modal-body">
+          <div>${r.created} produit(s) créé(s), ${r.updated} mis à jour${r.errors.length ? `, ${r.errors.length} ligne(s) ignorée(s)` : ''}.</div>
+          ${errorsHtml}
+          ${warningsHtml}
+        </div>
+        <div class="modal-footer"><div class="modal-footer-btn primary" data-action="closeImportPreview">Fermer</div></div>
+      </div>
+    </div>`;
+  }
+  const parseErrorsHtml = state.impParseErrors.length
+    ? `<div style="max-height:120px;overflow-y:auto;margin-top:10px;font-size:12px;color:var(--danger)">${state.impParseErrors.map(esc).join('<br/>')}</div>` : '';
+  return `<div class="modal-overlay">
+    <div class="modal-card" style="width:420px">
+      <div class="modal-header"><div class="modal-title">Importer ${esc(state.impFileName)}</div><div class="modal-close" data-action="closeImportPreview">×</div></div>
+      <div class="modal-body">
+        <div>${state.impRows.length} ligne(s) détectée(s) — ${state.impNewCount} nouveau(x) produit(s), ${state.impUpdateCount} mise(s) à jour (si l'ID est valide).</div>
+        ${parseErrorsHtml}
+      </div>
+      <div class="modal-footer">
+        <div class="modal-footer-btn secondary" data-action="closeImportPreview">Annuler</div>
+        <div class="modal-footer-btn primary" data-action="confirmImportProducts"${state.impBusy || state.impRows.length === 0 ? ' style="opacity:.6;pointer-events:none"' : ''}>${state.impBusy ? 'Import en cours…' : "Confirmer l'import"}</div>
+      </div>
+    </div>
+  </div>`;
+}
 function renderTransferForm() {
   const productOptions = state.products.slice().sort((a, b) => a.name.localeCompare(b.name))
     .map((p) => `<option value="${p.id}"${state.trProductId === p.id ? ' selected' : ''}>${esc(p.name)}</option>`).join('');
@@ -2285,6 +2491,10 @@ const Actions = {
   openScanner: (ds) => { state.showScanner = true; state.scanMode = (ds && ds.mode) || 'sell'; state.scanError = null; rerender(); },
   closeScanner: () => { state.showScanner = false; state.scanError = null; rerender(); },
   toggleAddProduct: () => { if (state.showAddProduct) resetProductForm(); else openAddProductForm(); rerender(); },
+  exportProductsCsv: () => exportProductsCsv(),
+  triggerImportFile: () => { const el = document.getElementById('field-impFile'); if (el) el.click(); },
+  confirmImportProducts: () => confirmImportProducts(),
+  closeImportPreview: () => closeImportPreview(),
   editProduct: (ds) => { openEditProductForm(ds.id); rerender(); },
   askDeleteProduct: (ds) => { state.confirmDeleteProductId = ds.id; rerender(); },
   cancelDeleteProduct: () => { state.confirmDeleteProductId = null; rerender(); },
@@ -2374,6 +2584,11 @@ function onChange(e) {
   const el = e.target;
   if (el.type === 'file' && el.dataset && el.dataset.bind === 'estLogoFile') {
     handleLogoFile(el.files && el.files[0]);
+    return;
+  }
+  if (el.type === 'file' && el.dataset && el.dataset.bind === 'impFile') {
+    handleImportCsvFile(el.files && el.files[0]);
+    el.value = ''; // allow re-selecting the same file name after a cancel/retry
     return;
   }
   // Date inputs commit on `change` (blur/Enter/date-picker close), not per
