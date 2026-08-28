@@ -24,6 +24,7 @@ const ICON_FACTURATION = '<svg width="18" height="18" viewBox="0 0 24 24" fill="
 const ICON_EXTERNAL = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3"><path d="M9 5H5a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-4"></path><path d="M15 3h6v6"></path><path d="M10 14 21 3"></path></svg>';
 const ICON_ETABLISSEMENT = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 21V9l8-5 8 5v12"></path><path d="M9 21v-6h6v6"></path><path d="M9 12h.01M15 12h.01M9 8h.01M15 8h.01"></path></svg>';
 const ICON_MENU = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3"><path d="M3 6h18M3 12h18M3 18h18"></path></svg>';
+const ICON_NOTIF = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"></path><path d="M13.7 21a2 2 0 0 1-3.4 0"></path></svg>';
 
 const FNE_URL = 'https://fne.dgi.gouv.ci';
 // The 4 fixed DGI tax codes accepted by the real FNE certification API —
@@ -62,6 +63,7 @@ const NAV_ITEMS = [
   { key: 'fournisseurs', label: 'Fournisseurs', icon: ICON_FOURN, managerOnly: true },
   { key: 'clients', label: 'Clients', icon: ICON_CLIENTS, managerOnly: false },
   { key: 'credits', label: 'Crédits', icon: ICON_CREDIT, managerOnly: false },
+  { key: 'notifications', label: 'Notifications', icon: ICON_NOTIF, managerOnly: false },
   { key: 'expenses', label: 'Dépenses', icon: ICON_EXPENSE, managerOnly: true },
   { key: 'facturation', label: 'Facturation', icon: ICON_FACTURATION, managerOnly: false, external: FNE_URL },
   { key: 'rapports', label: 'Rapports', icon: ICON_RAPPORTS, managerOnly: true },
@@ -79,6 +81,7 @@ const TITLES = {
   fournisseurs: ['Fournisseurs', 'Partenaires et approvisionnement'],
   clients: ['Clients', 'Base clients et fidélité'],
   credits: ['Crédits', 'Ventes à crédit et versements'],
+  notifications: ['Notifications', 'Rappels de crédit et alertes de disponibilité'],
   expenses: ['Dépenses', 'Suivi des sorties de caisse'],
   rapports: ['Rapports', 'Performance commerciale'],
   employes: ['Employés', 'Équipe et accès'],
@@ -91,7 +94,7 @@ const state = {
   loggedIn: false, role: null, userId: null, userName: '',
   loginMode: null, loginUsername: '', loginPassword: '', loginError: null,
   screen: 'dashboard',
-  depots: [], categories: [], suppliers: [], clients: [], employees: [], products: [], sales: [], expenses: [],
+  depots: [], categories: [], suppliers: [], clients: [], employees: [], products: [], sales: [], expenses: [], messageLog: [],
   currentDepotId: '', // depot the signed-in user is currently operating / selling from
   stockDepotFilter: '', dashDepotFilter: '', repDepotFilter: '', expenseDepotFilter: '', // 'all' or a depot id
   repDateMode: 'all', repDateFrom: '', repDateTo: '', // 'all'|'day'|'week'|'month'|'custom' — Rapports date filter
@@ -105,7 +108,9 @@ const state = {
   showImportPreview: false, impFileName: '', impRows: [], impNewCount: 0, impUpdateCount: 0, impParseErrors: [], impResult: null, impBusy: false,
   showAddCategory: false, ncName: '',
   showAddSupplier: false, nsName: '', nsPhone: '', nsEmail: '',
-  showAddClient: false, ncliName: '', ncliPhone: '', ncliNcc: '',
+  showAddClient: false, ncliName: '', ncliPhone: '', ncliEmail: '', ncliNcc: '',
+  showCreditReminderForm: false, msgClientId: '', msgChannel: 'sms', msgSubject: '', msgText: '',
+  showAvailabilityForm: false, msgProductId: '', msgRecipientMode: 'all', msgSelectedClientIds: [],
   showAddEmployee: false, neName: '', neRole: 'Caissier', neCustomRole: '', nePhone: '', neDepotId: '', nePassword: '',
   editingEmployeeId: null, confirmDeleteEmployeeId: null,
   showAddDepot: false, ndName: '', ndAddress: '',
@@ -348,6 +353,7 @@ async function loadAppState() {
     state.depots = data.depots || [];
     state.categories = data.categories; state.suppliers = data.suppliers; state.products = data.products;
     state.clients = data.clients; state.employees = data.employees; state.sales = data.sales; state.expenses = data.expenses || [];
+    state.messageLog = data.messageLog || [];
     const settings = data.settings || {};
     state.estCompanyName = settings.companyName || ''; state.estAddress = settings.address || '';
     state.estPhone = settings.phone || ''; state.estEmail = settings.email || '';
@@ -431,7 +437,7 @@ function logout() {
   // Drop any data fetched under the previous session so a slow-to-close tab
   // never shows one user's data after another logs in on the same browser.
   state.depots = []; state.categories = []; state.suppliers = []; state.products = [];
-  state.clients = []; state.employees = []; state.sales = []; state.expenses = [];
+  state.clients = []; state.employees = []; state.sales = []; state.expenses = []; state.messageLog = [];
   clearOfflineSnapshot(loggedOutUserId); // only this employee's cached entry — others on a shared device stay usable offline
   rerender();
 }
@@ -1053,6 +1059,118 @@ async function submitCreditPayment() {
   } catch (e) { flashToast(e.message); }
 }
 
+// ---------- Notifications (rappels de crédit / disponibilité produit) ----------
+// No SMS/email gateway is wired up yet — Orange SMS API and Gmail are the
+// planned targets, pending real credentials. Every action here only drafts a
+// message and copies it (and the recipient contacts) to the clipboard for a
+// manual send; "Marquer comme envoyé" just logs that the shop did so, it
+// never claims an automatic send happened. Wiring a real gateway later means
+// adding an actual server-side send call behind these same buttons — the
+// recipient-selection and message-drafting UI doesn't need to change.
+function clientsWithOutstandingCredit() {
+  const creditByClient = {};
+  state.sales.forEach((sa) => {
+    if (sa.paymentMethod === 'Crédit' && sa.creditRemaining > 0 && sa.clientId) {
+      creditByClient[sa.clientId] = (creditByClient[sa.clientId] || 0) + sa.creditRemaining;
+    }
+  });
+  return state.clients
+    .filter((c) => creditByClient[c.id] > 0)
+    .map((c) => ({ client: c, owed: creditByClient[c.id] }))
+    .sort((a, b) => b.owed - a.owed);
+}
+function shopName() { return state.estCompanyName || 'NassuaGroup'; }
+function openCreditReminderForm(clientId) {
+  const entry = clientsWithOutstandingCredit().find((x) => x.client.id === clientId);
+  if (!entry) return;
+  state.showCreditReminderForm = true;
+  state.msgClientId = clientId;
+  state.msgChannel = entry.client.phone ? 'sms' : 'email';
+  state.msgSubject = 'Rappel de solde — ' + shopName();
+  state.msgText = `Bonjour ${entry.client.name}, vous avez un solde de crédit de ${fcfa(entry.owed)} chez ${shopName()}. Merci de régulariser votre situation dès que possible.`;
+  rerender();
+}
+function closeCreditReminderForm() {
+  state.showCreditReminderForm = false; state.msgClientId = ''; state.msgSubject = ''; state.msgText = '';
+  rerender();
+}
+function setMsgChannel(channel) { state.msgChannel = channel; rerender(); }
+async function copyMsgText() {
+  const text = state.msgChannel === 'email' && state.msgSubject
+    ? `Objet : ${state.msgSubject}\n\n${state.msgText}` : state.msgText;
+  await copyText(text, 'Message copié');
+}
+function currentMsgClient() { return state.clients.find((c) => c.id === state.msgClientId); }
+async function copyMsgContact() {
+  const c = currentMsgClient();
+  if (!c) return;
+  const value = state.msgChannel === 'email' ? c.email : c.phone;
+  if (!value) { flashToast(state.msgChannel === 'email' ? "Ce client n'a pas d'email enregistré" : "Ce client n'a pas de téléphone enregistré"); return; }
+  await copyText(value, (state.msgChannel === 'email' ? 'Email' : 'Téléphone') + ' copié');
+}
+async function copyDebtorsList() {
+  const list = clientsWithOutstandingCredit();
+  if (!list.length) return;
+  const text = list.map(({ client: c, owed }) => `${c.name} — ${c.phone || 'pas de téléphone'}${c.email ? ' / ' + c.email : ''} — ${fcfa(owed)}`).join('\n');
+  await copyText(text, 'Liste des ' + list.length + ' client(s) endetté(s) copiée');
+}
+async function markMessageSent(type, recipientIds, productId) {
+  try {
+    const entry = await api('POST', '/api/messages/log', {
+      type, channel: state.msgChannel, recipientIds, message: state.msgText,
+      subject: state.msgChannel === 'email' ? state.msgSubject : '', productId: productId || '', recordedBy: state.userName,
+    });
+    state.messageLog.unshift(entry);
+    flashToast('Marqué comme envoyé (' + entry.recipientNames.length + ' destinataire(s))');
+    return true;
+  } catch (e) { flashToast(e.message); return false; }
+}
+async function sendCreditReminder() {
+  if (!state.msgClientId || !state.msgText.trim()) return;
+  const ok = await markMessageSent('credit-reminder', [state.msgClientId]);
+  if (ok) closeCreditReminderForm(); else rerender();
+}
+
+function toggleAvailabilityForm() {
+  state.showAvailabilityForm = !state.showAvailabilityForm;
+  if (state.showAvailabilityForm) {
+    state.msgProductId = state.products[0] ? state.products[0].id : '';
+    state.msgRecipientMode = 'all';
+    state.msgSelectedClientIds = [];
+    state.msgChannel = 'sms';
+    regenerateAvailabilityMessage();
+  }
+  rerender();
+}
+function regenerateAvailabilityMessage() {
+  const p = state.products.find((pp) => pp.id === state.msgProductId);
+  const productLabel = p ? `"${p.name}"` : 'ce produit';
+  const priceLabel = p ? ` Prix : ${fcfa(p.price)}.` : '';
+  state.msgSubject = 'Disponibilité : ' + (p ? p.name : '');
+  state.msgText = `Bonjour, ${productLabel} est de nouveau disponible chez ${shopName()}.${priceLabel} N'hésitez pas à passer nous voir !`;
+}
+function toggleMsgRecipient(clientId) {
+  const idx = state.msgSelectedClientIds.indexOf(clientId);
+  if (idx >= 0) state.msgSelectedClientIds.splice(idx, 1); else state.msgSelectedClientIds.push(clientId);
+  rerender();
+}
+function availabilityRecipients() {
+  if (state.msgRecipientMode === 'all') return state.clients;
+  return state.clients.filter((c) => state.msgSelectedClientIds.includes(c.id));
+}
+async function copyAvailabilityContacts() {
+  const recipients = availabilityRecipients();
+  const values = recipients.map((c) => (state.msgChannel === 'email' ? c.email : c.phone)).filter(Boolean);
+  if (!values.length) { flashToast('Aucun contact ' + (state.msgChannel === 'email' ? 'email' : 'téléphone') + ' disponible parmi les destinataires'); return; }
+  await copyText(values.join(', '), values.length + ' contact(s) copié(s)');
+}
+async function sendAvailabilityBroadcast() {
+  const recipients = availabilityRecipients();
+  if (!recipients.length || !state.msgText.trim()) return;
+  const ok = await markMessageSent('availability', recipients.map((c) => c.id), state.msgProductId);
+  if (ok) { state.showAvailabilityForm = false; rerender(); } else rerender();
+}
+
 // ---------- Dépenses ----------
 async function addExpense() {
   const category = state.exCategory === 'Autre' ? state.exCustomCategory.trim() : state.exCategory;
@@ -1173,9 +1291,9 @@ async function addSupplier() {
 async function addClient() {
   if (!state.ncliName.trim()) return;
   try {
-    const client = await api('POST', '/api/clients', { name: state.ncliName.trim(), phone: state.ncliPhone, ncc: state.ncliNcc });
+    const client = await api('POST', '/api/clients', { name: state.ncliName.trim(), phone: state.ncliPhone, email: state.ncliEmail, ncc: state.ncliNcc });
     state.clients.push(client);
-    state.showAddClient = false; state.ncliName = ''; state.ncliPhone = ''; state.ncliNcc = '';
+    state.showAddClient = false; state.ncliName = ''; state.ncliPhone = ''; state.ncliEmail = ''; state.ncliNcc = '';
     flashToast('Client ajouté : ' + client.name);
     rerender();
   } catch (e) { flashToast(e.message); }
@@ -1402,6 +1520,7 @@ function renderScreen() {
     case 'fournisseurs': return renderFournisseurs();
     case 'clients': return renderClients();
     case 'credits': return renderCredits();
+    case 'notifications': return renderNotifications();
     case 'expenses': return renderExpenses();
     case 'rapports': return renderRapports();
     case 'employes': return renderEmployes();
@@ -1803,11 +1922,12 @@ function renderClients() {
   });
   const rows = state.clients.map((c) => {
     const owed = creditByClient[c.id] || 0;
-    return `<tr><td style="font-weight:600">${esc(c.name)}</td><td>${esc(c.phone)}</td><td class="center">${c.points}</td><td class="right">${fcfa(c.totalSpent)}</td><td class="right"${owed ? ' style="color:var(--danger);font-weight:700"' : ''}>${owed ? fcfa(owed) : '—'}</td></tr>`;
+    return `<tr><td style="font-weight:600">${esc(c.name)}</td><td>${esc(c.phone)}</td><td>${c.email ? esc(c.email) : '<span style="color:var(--muted)">—</span>'}</td><td class="center">${c.points}</td><td class="right">${fcfa(c.totalSpent)}</td><td class="right"${owed ? ' style="color:var(--danger);font-weight:700"' : ''}>${owed ? fcfa(owed) : '—'}</td></tr>`;
   }).join('');
   const addFormHtml = state.showAddClient ? `<div class="add-form cols-inline" style="gap:10px">
     <input id="field-ncliName" class="field" style="flex:1" type="text" placeholder="Nom du client" value="${esc(state.ncliName)}" data-bind="ncliName" />
     <input id="field-ncliPhone" class="field" style="flex:1" type="text" placeholder="Téléphone" value="${esc(state.ncliPhone)}" data-bind="ncliPhone" />
+    <input id="field-ncliEmail" class="field" style="flex:1" type="email" placeholder="Email (optionnel)" value="${esc(state.ncliEmail)}" data-bind="ncliEmail" />
     <input id="field-ncliNcc" class="field" style="flex:1" type="text" placeholder="NCC (si client professionnel, optionnel)" value="${esc(state.ncliNcc)}" data-bind="ncliNcc" />
     <div class="save-btn" data-action="addClient">Enregistrer</div>
   </div>` : '';
@@ -1815,7 +1935,7 @@ function renderClients() {
     <div style="display:flex;justify-content:flex-end;margin-bottom:16px"><div class="add-btn" data-action="toggleAddClient">+ Ajouter un client</div></div>
     ${addFormHtml}
     <div class="table-card"><table class="data-table">
-      <tr><th>CLIENT</th><th>TÉLÉPHONE</th><th class="center">POINTS FIDÉLITÉ</th><th class="right">TOTAL DÉPENSÉ</th><th class="right">CRÉDIT EN COURS</th></tr>
+      <tr><th>CLIENT</th><th>TÉLÉPHONE</th><th>EMAIL</th><th class="center">POINTS FIDÉLITÉ</th><th class="right">TOTAL DÉPENSÉ</th><th class="right">CRÉDIT EN COURS</th></tr>
       ${rows}
     </table></div>
   </div>`;
@@ -1870,6 +1990,125 @@ function renderCreditPaymentForm() {
     <input id="field-cpAmount" class="field" type="number" placeholder="Montant du versement" value="${esc(state.cpAmount)}" data-bind="cpAmount" />
     <div class="save-btn" data-action="doCreditPayment">Encaisser</div>
     <div class="add-btn" style="background:#fff;color:var(--muted);border:1px solid var(--border)" data-action="cancelCreditPayment">Annuler</div>
+  </div>`;
+}
+
+// A message-compose block shared by both the credit-reminder form (single
+// client) and the availability broadcast form (many clients) — the caller
+// passes what differs: the recipient summary line, whether a subject field
+// applies, and the send/cancel actions.
+function renderMessageComposeFields(recipientSummaryHtml) {
+  return `
+    <div style="grid-column:1/-1" class="pos-hint">Aucune passerelle SMS/email connectée pour l'instant (Orange SMS API et Gmail sont prévus) — copiez le message ci-dessous et envoyez-le manuellement, puis marquez-le comme envoyé.</div>
+    <div style="grid-column:1/-1">${recipientSummaryHtml}</div>
+    <div class="pay-tabs" style="grid-column:1/-1;max-width:220px">
+      <div class="pay-tab${state.msgChannel === 'sms' ? ' active' : ''}" data-action="setMsgChannelSms">SMS</div>
+      <div class="pay-tab${state.msgChannel === 'email' ? ' active' : ''}" data-action="setMsgChannelEmail">Email</div>
+    </div>
+    ${state.msgChannel === 'email' ? `<input id="field-msgSubject" class="field" style="grid-column:1/-1" type="text" placeholder="Objet" value="${esc(state.msgSubject)}" data-bind="msgSubject" />` : ''}
+    <textarea id="field-msgText" class="field" style="grid-column:1/-1;min-height:90px;resize:vertical" placeholder="Message" data-bind="msgText">${esc(state.msgText)}</textarea>`;
+}
+
+function renderCreditReminderForm() {
+  const c = currentMsgClient();
+  if (!c) return '';
+  const contactValue = state.msgChannel === 'email' ? c.email : c.phone;
+  const summaryHtml = `Destinataire : <strong>${esc(c.name)}</strong> — ${contactValue ? esc(contactValue) : `<span style="color:var(--danger)">pas de ${state.msgChannel === 'email' ? 'email' : 'téléphone'} enregistré</span>`}`;
+  return `<div class="add-form cols-2">
+    ${renderMessageComposeFields(summaryHtml)}
+    <div class="save-btn" data-action="copyMsgTextAction">Copier le message</div>
+    <div class="add-btn" style="background:#fff;color:var(--green);border:1px solid var(--border)" data-action="copyMsgContactAction">Copier le ${state.msgChannel === 'email' ? 'email' : 'numéro'}</div>
+    <div class="save-btn" style="background:var(--green)" data-action="sendCreditReminderAction">Marquer comme envoyé</div>
+    <div class="add-btn" style="background:#fff;color:var(--muted);border:1px solid var(--border)" data-action="closeCreditReminderForm">Annuler</div>
+  </div>`;
+}
+
+function renderAvailabilityForm() {
+  if (!state.showAvailabilityForm) return '';
+  const productOptions = state.products.slice().sort((a, b) => a.name.localeCompare(b.name))
+    .map((p) => `<option value="${p.id}"${state.msgProductId === p.id ? ' selected' : ''}>${esc(p.name)}</option>`).join('');
+  const recipients = availabilityRecipients();
+  const clientRowsHtml = state.clients.map((c) => {
+    const selected = state.msgSelectedClientIds.includes(c.id);
+    const contact = state.msgChannel === 'email' ? (c.email || 'pas d\'email') : (c.phone || 'pas de téléphone');
+    return `<div class="msg-recipient-row${selected ? ' selected' : ''}" data-action="toggleMsgRecipient" data-id="${c.id}">
+      <span>${selected ? ICON_CHECK : ''}</span>
+      <span style="flex:1">${esc(c.name)}</span>
+      <span style="color:var(--muted);font-size:12px">${esc(contact)}</span>
+    </div>`;
+  }).join('');
+  const recipientPickerHtml = state.msgRecipientMode === 'specific'
+    ? `<div style="grid-column:1/-1;max-height:180px;overflow-y:auto;border:1px solid var(--border);border-radius:8px">${clientRowsHtml || '<div style="padding:12px;color:var(--muted);font-size:13px">Aucun client enregistré.</div>'}</div>` : '';
+  const summaryHtml = `Destinataires : <strong>${recipients.length}</strong> client(s) ${state.msgRecipientMode === 'all' ? '(tous les clients)' : 'sélectionné(s)'}`;
+  return `<div class="add-form cols-2">
+    <select id="field-msgProductId" class="field" style="grid-column:1/-1" data-bind="msgProductId">${productOptions}</select>
+    <div class="pay-tabs" style="grid-column:1/-1;max-width:320px">
+      <div class="pay-tab${state.msgRecipientMode === 'all' ? ' active' : ''}" data-action="setMsgRecipientModeAll">Tous les clients</div>
+      <div class="pay-tab${state.msgRecipientMode === 'specific' ? ' active' : ''}" data-action="setMsgRecipientModeSpecific">Clients spécifiques</div>
+    </div>
+    ${recipientPickerHtml}
+    ${renderMessageComposeFields(summaryHtml)}
+    <div class="save-btn" data-action="copyMsgTextAction">Copier le message</div>
+    <div class="add-btn" style="background:#fff;color:var(--green);border:1px solid var(--border)" data-action="copyAvailabilityContactsAction">Copier les ${state.msgChannel === 'email' ? 'emails' : 'numéros'}</div>
+    <div class="save-btn" style="background:var(--green)" data-action="sendAvailabilityBroadcastAction">Marquer comme envoyé</div>
+    <div class="add-btn" style="background:#fff;color:var(--muted);border:1px solid var(--border)" data-action="toggleAvailabilityForm">Annuler</div>
+  </div>`;
+}
+
+function renderMessageLogTable() {
+  const rows = state.messageLog.slice(0, 50).map((m) => {
+    const typeLabel = m.type === 'credit-reminder' ? 'Rappel de crédit' : 'Disponibilité' + (m.productName ? ' — ' + esc(m.productName) : '');
+    const recipientsLabel = m.recipientNames.length > 2
+      ? m.recipientNames.length + ' destinataires'
+      : m.recipientNames.map(esc).join(', ');
+    return `<tr>
+      <td>${esc(dayLabel(m.sentAt))}</td>
+      <td style="font-weight:600">${typeLabel}</td>
+      <td class="center">${m.channel === 'email' ? 'Email' : 'SMS'}</td>
+      <td>${recipientsLabel}</td>
+      <td style="max-width:280px;white-space:normal;font-size:12.5px;color:var(--muted)">${esc(m.message)}</td>
+      <td>${esc(m.recordedBy) || '—'}</td>
+    </tr>`;
+  }).join('');
+  return `<div class="table-card"><table class="data-table">
+    <tr><th>DATE</th><th>TYPE</th><th class="center">CANAL</th><th>DESTINATAIRES</th><th>MESSAGE</th><th>PAR</th></tr>
+    ${rows || '<tr><td colspan="6" style="text-align:center;color:var(--muted);padding:20px">Aucun message enregistré.</td></tr>'}
+  </table></div>`;
+}
+
+function renderNotifications() {
+  const debtors = clientsWithOutstandingCredit();
+  const debtorRowsHtml = debtors.map(({ client: c, owed }) => `<tr>
+    <td style="font-weight:600">${esc(c.name)}</td>
+    <td>${esc(c.phone) || '—'}</td>
+    <td>${c.email ? esc(c.email) : '—'}</td>
+    <td class="right" style="font-weight:700;color:var(--danger)">${fcfa(owed)}</td>
+    <td class="center"><div class="add-btn" style="background:#fff;color:var(--green);border:1px solid var(--border);padding:6px 12px;font-size:12px" data-action="openCreditReminderForm" data-id="${c.id}">Composer un rappel</div></td>
+  </tr>`).join('');
+  const creditReminderFormHtml = state.showCreditReminderForm ? renderCreditReminderForm() : '';
+
+  const availabilitySectionHtml = state.role === 'manager' ? `
+    <div style="display:flex;justify-content:space-between;align-items:center;margin:28px 0 16px">
+      <div class="card-title" style="margin:0">Disponibilité produit</div>
+      <div class="add-btn" data-action="toggleAvailabilityForm">${state.showAvailabilityForm ? 'Fermer' : '+ Composer une annonce'}</div>
+    </div>
+    ${renderAvailabilityForm()}` : '';
+
+  return `<div>
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;flex-wrap:wrap;gap:10px">
+      <div class="card-title" style="margin:0">Rappels de crédit</div>
+      ${debtors.length ? `<div class="add-btn" style="background:#fff;color:var(--green);border:1px solid var(--border)" data-action="copyDebtorsListAction">Copier la liste des clients endettés</div>` : ''}
+    </div>
+    ${creditReminderFormHtml}
+    <div class="table-card"><table class="data-table">
+      <tr><th>CLIENT</th><th>TÉLÉPHONE</th><th>EMAIL</th><th class="right">MONTANT DÛ</th><th class="center">ACTION</th></tr>
+      ${debtorRowsHtml || '<tr><td colspan="5" style="text-align:center;color:var(--muted);padding:20px">Aucun client avec un crédit en cours.</td></tr>'}
+    </table></div>
+
+    ${availabilitySectionHtml}
+
+    <div class="card-title" style="margin:28px 0 16px">Historique des communications</div>
+    ${renderMessageLogTable()}
   </div>`;
 }
 
@@ -2547,6 +2786,20 @@ const Actions = {
   openCreditPayment: (ds) => { state.showCreditPayment = true; state.cpSaleId = ds.id; state.cpAmount = ''; rerender(); },
   cancelCreditPayment: () => { state.showCreditPayment = false; state.cpSaleId = ''; state.cpAmount = ''; rerender(); },
   doCreditPayment: () => submitCreditPayment(),
+  openCreditReminderForm: (ds) => openCreditReminderForm(ds.id),
+  closeCreditReminderForm: () => closeCreditReminderForm(),
+  setMsgChannelSms: () => setMsgChannel('sms'),
+  setMsgChannelEmail: () => setMsgChannel('email'),
+  copyMsgTextAction: () => copyMsgText(),
+  copyMsgContactAction: () => copyMsgContact(),
+  sendCreditReminderAction: () => sendCreditReminder(),
+  copyDebtorsListAction: () => copyDebtorsList(),
+  toggleAvailabilityForm: () => toggleAvailabilityForm(),
+  setMsgRecipientModeAll: () => { state.msgRecipientMode = 'all'; rerender(); },
+  setMsgRecipientModeSpecific: () => { state.msgRecipientMode = 'specific'; rerender(); },
+  toggleMsgRecipient: (ds) => toggleMsgRecipient(ds.id),
+  copyAvailabilityContactsAction: () => copyAvailabilityContacts(),
+  sendAvailabilityBroadcastAction: () => sendAvailabilityBroadcast(),
   toggleAddExpense: () => {
     state.showAddExpense = !state.showAddExpense;
     if (state.showAddExpense) {
@@ -2651,6 +2904,10 @@ function onChange(e) {
     // A unit picked for the previous product may not apply to the new one
     // (e.g. it has no carton configured) — reset to avoid a stale mismatch.
     state.rsUnit = 'detail';
+  } else if (bind === 'msgProductId') {
+    // Re-derive the availability message for the newly picked product —
+    // otherwise the draft would keep naming the previous product.
+    regenerateAvailabilityMessage();
   } else if (bind === 'scanDeviceId') {
     // Switching camera (e.g. to a phone used as a webcam) needs the video
     // stream itself restarted, not just the state value updated.

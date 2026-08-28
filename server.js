@@ -187,7 +187,7 @@ function buildSeed() {
       recordedBy: e.cashier,
     };
   });
-  return { depots, categories, suppliers, products, clients, employees, sales, expenses, settings: defaultSettings(), fneConfig: defaultFneConfig() };
+  return { depots, categories, suppliers, products, clients, employees, sales, expenses, messageLog: [], settings: defaultSettings(), fneConfig: defaultFneConfig() };
 }
 
 // Upgrades a pre-multi-dépôt tenant db (flat product.stock, no depots) in
@@ -235,6 +235,10 @@ function migrateToDepots(data) {
 function migrateTenantData(data) {
   let changed = migrateToDepots(data);
   if (!Array.isArray(data.expenses)) { data.expenses = []; changed = true; }
+  if (!Array.isArray(data.messageLog)) { data.messageLog = []; changed = true; }
+  (data.clients || []).forEach((c) => {
+    if (c.email === undefined) { c.email = ''; changed = true; }
+  });
   (data.products || []).forEach((p) => {
     if (p.unitsPerPack === undefined) {
       p.unitsPerPack = 0; p.pricePerPack = 0; p.unitsPerCarton = 0; p.pricePerCarton = 0;
@@ -689,7 +693,7 @@ async function handleApi(req, res, pathname) {
     const newDb = {
       depots: [{ id: 'd1', name: 'Dépôt principal', address: '' }],
       categories: [], suppliers: [], products: [], clients: [],
-      employees: [managerEmployee], sales: [], expenses: [],
+      employees: [managerEmployee], sales: [], expenses: [], messageLog: [],
       settings: defaultSettings(shopName), fneConfig: defaultFneConfig(),
     };
     tenants.set(tenantId, newDb);
@@ -802,7 +806,7 @@ async function handleApi(req, res, pathname) {
     const body = await readJSONBody(req);
     const name = (body.name || '').trim();
     if (!name) return sendJSON(res, 400, { error: 'Nom requis' });
-    const client = { id: uid('cl'), name, phone: body.phone || '', ncc: (body.ncc || '').trim(), points: 0, totalSpent: 0 };
+    const client = { id: uid('cl'), name, phone: body.phone || '', email: (body.email || '').trim(), ncc: (body.ncc || '').trim(), points: 0, totalSpent: 0 };
     db.clients.push(client);
     saveTenant(session.tenantId);
     return sendJSON(res, 201, client);
@@ -1232,6 +1236,62 @@ async function handleApi(req, res, pathname) {
     db.expenses.unshift(expense);
     saveTenant(session.tenantId);
     return sendJSON(res, 201, expense);
+  }
+
+  // Records that a credit reminder or product-availability message was
+  // composed and (per the shop's own confirmation) sent manually — there is
+  // no SMS/email gateway wired up yet (Orange SMS API / Gmail are the
+  // planned targets, pending real credentials), so this is a self-reported
+  // communication log, not a delivery receipt. The client only ever offers
+  // "copy the message" + "mark as sent" actions, never claims an automatic
+  // send happened.
+  if (pathname === '/api/messages/log' && method === 'POST') {
+    const body = await readJSONBody(req);
+    const type = body.type;
+    if (type !== 'credit-reminder' && type !== 'availability') {
+      return sendJSON(res, 400, { error: 'Type de message invalide' });
+    }
+    // Only "availability" (a bulk broadcast to potentially every client) is
+    // manager-gated here — it can't go in the static MANAGER_ONLY list above
+    // since that's checked before the body (and therefore `type`) is known.
+    // Credit reminders stay open to both roles, same tier as the rest of
+    // the Crédits screen.
+    if (type === 'availability' && !isManager) {
+      return sendJSON(res, 403, { error: 'Action réservée au Gérant' });
+    }
+    const channel = body.channel;
+    if (channel !== 'sms' && channel !== 'email') {
+      return sendJSON(res, 400, { error: 'Canal invalide' });
+    }
+    const recipientIds = Array.isArray(body.recipientIds) ? body.recipientIds : [];
+    if (recipientIds.length === 0) return sendJSON(res, 400, { error: 'Aucun destinataire' });
+    const message = (body.message || '').trim();
+    if (!message) return sendJSON(res, 400, { error: 'Message vide' });
+    const recipientNames = recipientIds.map((id) => {
+      const c = db.clients.find((cl) => cl.id === id);
+      return c ? c.name : 'Client supprimé';
+    });
+    let productName = '';
+    if (type === 'availability' && body.productId) {
+      const p = db.products.find((pp) => pp.id === body.productId);
+      productName = p ? p.name : '';
+    }
+    const entry = {
+      id: uid('msg'),
+      type,
+      channel,
+      recipientIds,
+      recipientNames,
+      message,
+      subject: (body.subject || '').trim(),
+      productId: body.productId || '',
+      productName,
+      recordedBy: body.recordedBy || '',
+      sentAt: new Date().toISOString(),
+    };
+    db.messageLog.unshift(entry);
+    saveTenant(session.tenantId);
+    return sendJSON(res, 201, entry);
   }
 
   if (pathname === '/api/settings' && method === 'PATCH') {
