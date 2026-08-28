@@ -738,6 +738,11 @@ async function handleApi(req, res, pathname) {
     pathname === '/api/fne/config' && method === 'PATCH',
     /^\/api\/employees\/[^/]+(\/toggle)?$/.test(pathname) && method !== 'GET',
     /^\/api\/products\/[^/]+$/.test(pathname) && method === 'DELETE',
+    // Client edit stays open to both roles (routine contact-info fixes,
+    // same tier as product edit); delete is manager-gated like product
+    // delete — removing a customer record entirely is more structurally
+    // impactful than fixing their phone number.
+    /^\/api\/clients\/[^/]+$/.test(pathname) && method === 'DELETE',
     // Bulk create/update plus auto-creating categories/suppliers as a side
     // effect is more structurally impactful than a single product add/edit
     // (which stays open to both roles) — same reasoning as DELETE above.
@@ -810,6 +815,45 @@ async function handleApi(req, res, pathname) {
     db.clients.push(client);
     saveTenant(session.tenantId);
     return sendJSON(res, 201, client);
+  }
+
+  const clientMatch = pathname.match(/^\/api\/clients\/([^/]+)$/);
+  if (clientMatch && method === 'PATCH') {
+    const client = db.clients.find((c) => c.id === clientMatch[1]);
+    if (!client) return sendJSON(res, 404, { error: 'Client introuvable' });
+    const body = await readJSONBody(req);
+    if (body.name !== undefined) {
+      const name = body.name.trim();
+      if (!name) return sendJSON(res, 400, { error: 'Nom requis' });
+      client.name = name;
+    }
+    if (body.phone !== undefined) client.phone = body.phone.trim();
+    if (body.email !== undefined) client.email = body.email.trim();
+    if (body.ncc !== undefined) client.ncc = body.ncc.trim();
+    saveTenant(session.tenantId);
+    return sendJSON(res, 200, client);
+  }
+
+  if (clientMatch && method === 'DELETE') {
+    const client = db.clients.find((c) => c.id === clientMatch[1]);
+    if (!client) return sendJSON(res, 404, { error: 'Client introuvable' });
+    // A deleted client's name still lives on in sale.clientName (snapshotted
+    // at checkout time, same as product name/price on sale.items) so past
+    // receipts/history are unaffected — but an OPEN credit balance is only
+    // ever surfaced by looking the client back up from db.clients (Clients'
+    // "Crédit en cours" column, the Notifications screen's debtor list), so
+    // deleting the client record would make a real, still-owed debt
+    // invisible everywhere except the raw Crédits sales list. Blocked,
+    // mirroring the existing "can't delete the last active Gérant" guard.
+    const owed = db.sales
+      .filter((sa) => sa.clientId === client.id && sa.paymentMethod === 'Crédit')
+      .reduce((a, sa) => a + (sa.creditRemaining || 0), 0);
+    if (owed > 0) {
+      return sendJSON(res, 409, { error: `Impossible de supprimer ce client : il a un crédit en cours de ${Math.round(owed)} FCFA. Réglez le solde d'abord.` });
+    }
+    db.clients = db.clients.filter((c) => c.id !== client.id);
+    saveTenant(session.tenantId);
+    return sendJSON(res, 200, { ok: true });
   }
 
   if (pathname === '/api/employees' && method === 'POST') {

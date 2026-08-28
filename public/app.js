@@ -108,7 +108,7 @@ const state = {
   showImportPreview: false, impFileName: '', impRows: [], impNewCount: 0, impUpdateCount: 0, impParseErrors: [], impResult: null, impBusy: false,
   showAddCategory: false, ncName: '',
   showAddSupplier: false, nsName: '', nsPhone: '', nsEmail: '',
-  showAddClient: false, ncliName: '', ncliPhone: '', ncliEmail: '', ncliNcc: '',
+  showAddClient: false, ncliName: '', ncliPhone: '', ncliEmail: '', ncliNcc: '', editingClientId: null, confirmDeleteClientId: null,
   showCreditReminderForm: false, msgClientId: '', msgChannel: 'sms', msgSubject: '', msgText: '',
   showAvailabilityForm: false, msgProductId: '', msgRecipientMode: 'all', msgSelectedClientIds: [],
   showAddEmployee: false, neName: '', neRole: 'Caissier', neCustomRole: '', nePhone: '', neDepotId: '', nePassword: '',
@@ -1288,15 +1288,61 @@ async function addSupplier() {
     rerender();
   } catch (e) { flashToast(e.message); }
 }
+function resetClientForm() {
+  state.showAddClient = false; state.editingClientId = null;
+  state.ncliName = ''; state.ncliPhone = ''; state.ncliEmail = ''; state.ncliNcc = '';
+}
+function openAddClientForm() {
+  resetClientForm();
+  state.showAddClient = true;
+}
+function openEditClientForm(id) {
+  const c = state.clients.find((cl) => cl.id === id);
+  if (!c) return;
+  resetClientForm();
+  state.editingClientId = id;
+  state.ncliName = c.name; state.ncliPhone = c.phone || ''; state.ncliEmail = c.email || ''; state.ncliNcc = c.ncc || '';
+  state.confirmDeleteClientId = null;
+  state.showAddClient = true;
+}
+function saveClient() {
+  return state.editingClientId ? updateClient() : addClient();
+}
 async function addClient() {
   if (!state.ncliName.trim()) return;
   try {
     const client = await api('POST', '/api/clients', { name: state.ncliName.trim(), phone: state.ncliPhone, email: state.ncliEmail, ncc: state.ncliNcc });
     state.clients.push(client);
-    state.showAddClient = false; state.ncliName = ''; state.ncliPhone = ''; state.ncliEmail = ''; state.ncliNcc = '';
+    resetClientForm();
     flashToast('Client ajouté : ' + client.name);
     rerender();
   } catch (e) { flashToast(e.message); }
+}
+async function updateClient() {
+  if (!state.ncliName.trim()) return;
+  try {
+    const updated = await api('PATCH', `/api/clients/${state.editingClientId}`, {
+      name: state.ncliName.trim(), phone: state.ncliPhone, email: state.ncliEmail, ncc: state.ncliNcc,
+    });
+    const idx = state.clients.findIndex((c) => c.id === updated.id);
+    if (idx >= 0) state.clients[idx] = updated;
+    resetClientForm();
+    flashToast('Client mis à jour : ' + updated.name);
+    rerender();
+  } catch (e) { flashToast(e.message); }
+}
+async function deleteClient(id) {
+  try {
+    await api('DELETE', `/api/clients/${id}`);
+    state.clients = state.clients.filter((c) => c.id !== id);
+    state.confirmDeleteClientId = null;
+    flashToast('Client supprimé');
+    rerender();
+  } catch (e) {
+    state.confirmDeleteClientId = null;
+    flashToast(e.message);
+    rerender();
+  }
 }
 function resetEmployeeForm() {
   state.showAddEmployee = false; state.editingEmployeeId = null;
@@ -1920,22 +1966,34 @@ function renderClients() {
       creditByClient[sa.clientId] = (creditByClient[sa.clientId] || 0) + sa.creditRemaining;
     }
   });
+  const isEditing = !!state.editingClientId;
   const rows = state.clients.map((c) => {
     const owed = creditByClient[c.id] || 0;
-    return `<tr><td style="font-weight:600">${esc(c.name)}</td><td>${esc(c.phone)}</td><td>${c.email ? esc(c.email) : '<span style="color:var(--muted)">—</span>'}</td><td class="center">${c.points}</td><td class="right">${fcfa(c.totalSpent)}</td><td class="right"${owed ? ' style="color:var(--danger);font-weight:700"' : ''}>${owed ? fcfa(owed) : '—'}</td></tr>`;
+    const actionsHtml = state.confirmDeleteClientId === c.id
+      ? `<div style="display:flex;gap:6px;align-items:center;justify-content:center">
+          <span style="font-size:11px;color:var(--danger);font-weight:600">Supprimer ?</span>
+          <div class="stepper-btn" style="color:var(--danger)" data-action="confirmDeleteClient" data-id="${c.id}" title="Confirmer">${ICON_CHECK}</div>
+          <div class="stepper-btn" data-action="cancelDeleteClient" title="Annuler">${ICON_CLOSE}</div>
+        </div>`
+      : `<div style="display:flex;gap:10px;justify-content:center">
+          <div style="cursor:pointer;color:var(--muted)" data-action="editClient" data-id="${c.id}" title="Modifier">${ICON_EDIT}</div>
+          ${state.role === 'manager' ? `<div style="cursor:pointer;color:var(--danger)" data-action="askDeleteClient" data-id="${c.id}" title="Supprimer">${ICON_TRASH}</div>` : ''}
+        </div>`;
+    return `<tr><td style="font-weight:600">${esc(c.name)}</td><td>${esc(c.phone)}</td><td>${c.email ? esc(c.email) : '<span style="color:var(--muted)">—</span>'}</td><td class="center">${c.points}</td><td class="right">${fcfa(c.totalSpent)}</td><td class="right"${owed ? ' style="color:var(--danger);font-weight:700"' : ''}>${owed ? fcfa(owed) : '—'}</td><td class="center">${actionsHtml}</td></tr>`;
   }).join('');
   const addFormHtml = state.showAddClient ? `<div class="add-form cols-inline" style="gap:10px">
     <input id="field-ncliName" class="field" style="flex:1" type="text" placeholder="Nom du client" value="${esc(state.ncliName)}" data-bind="ncliName" />
     <input id="field-ncliPhone" class="field" style="flex:1" type="text" placeholder="Téléphone" value="${esc(state.ncliPhone)}" data-bind="ncliPhone" />
     <input id="field-ncliEmail" class="field" style="flex:1" type="email" placeholder="Email (optionnel)" value="${esc(state.ncliEmail)}" data-bind="ncliEmail" />
     <input id="field-ncliNcc" class="field" style="flex:1" type="text" placeholder="NCC (si client professionnel, optionnel)" value="${esc(state.ncliNcc)}" data-bind="ncliNcc" />
-    <div class="save-btn" data-action="addClient">Enregistrer</div>
+    <div class="save-btn" data-action="saveClient">${isEditing ? 'Mettre à jour' : 'Enregistrer'}</div>
+    ${isEditing ? `<div class="add-btn" style="background:#fff;color:var(--muted);border:1px solid var(--border)" data-action="cancelEditClient">Annuler</div>` : ''}
   </div>` : '';
   return `<div>
     <div style="display:flex;justify-content:flex-end;margin-bottom:16px"><div class="add-btn" data-action="toggleAddClient">+ Ajouter un client</div></div>
     ${addFormHtml}
     <div class="table-card"><table class="data-table">
-      <tr><th>CLIENT</th><th>TÉLÉPHONE</th><th>EMAIL</th><th class="center">POINTS FIDÉLITÉ</th><th class="right">TOTAL DÉPENSÉ</th><th class="right">CRÉDIT EN COURS</th></tr>
+      <tr><th>CLIENT</th><th>TÉLÉPHONE</th><th>EMAIL</th><th class="center">POINTS FIDÉLITÉ</th><th class="right">TOTAL DÉPENSÉ</th><th class="right">CRÉDIT EN COURS</th><th class="center">ACTIONS</th></tr>
       ${rows}
     </table></div>
   </div>`;
@@ -2735,7 +2793,7 @@ const Actions = {
   logout: () => logout(),
   workOffline: (ds) => workOffline(ds.key),
   syncOfflineNow: () => syncOfflineSales(),
-  nav: (ds) => { state.screen = ds.screen; state.pwError = null; state.pwSuccess = null; state.confirmDeleteEmployeeId = null; state.confirmDeleteProductId = null; state.mobileNavOpen = false; rerender(); },
+  nav: (ds) => { state.screen = ds.screen; state.pwError = null; state.pwSuccess = null; state.confirmDeleteEmployeeId = null; state.confirmDeleteProductId = null; state.confirmDeleteClientId = null; state.mobileNavOpen = false; rerender(); },
   toggleMobileNav: () => { state.mobileNavOpen = !state.mobileNavOpen; rerender(); },
   closeMobileNav: () => { state.mobileNavOpen = false; rerender(); },
   openExternal: (ds) => { window.open(ds.url, '_blank', 'noopener'); },
@@ -2815,8 +2873,13 @@ const Actions = {
   addCategory: () => addCategory(),
   toggleAddSupplier: () => { state.showAddSupplier = !state.showAddSupplier; rerender(); },
   addSupplier: () => addSupplier(),
-  toggleAddClient: () => { state.showAddClient = !state.showAddClient; rerender(); },
-  addClient: () => addClient(),
+  toggleAddClient: () => { if (state.showAddClient) resetClientForm(); else openAddClientForm(); rerender(); },
+  editClient: (ds) => { openEditClientForm(ds.id); rerender(); },
+  saveClient: () => saveClient(),
+  cancelEditClient: () => { resetClientForm(); rerender(); },
+  askDeleteClient: (ds) => { state.confirmDeleteClientId = ds.id; rerender(); },
+  cancelDeleteClient: () => { state.confirmDeleteClientId = null; rerender(); },
+  confirmDeleteClient: (ds) => deleteClient(ds.id),
   toggleAddEmployee: () => { if (state.showAddEmployee) resetEmployeeForm(); else openAddEmployeeForm(); rerender(); },
   editEmployee: (ds) => { openEditEmployeeForm(ds.id); rerender(); },
   saveEmployee: () => saveEmployee(),
