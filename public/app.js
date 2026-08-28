@@ -122,6 +122,8 @@ const state = {
   estCompanyName: '', estAddress: '', estPhone: '', estEmail: '', estTaxId: '', estLogo: '',
   estNcc: '', estTaxRegime: '', estTaxCenter: '', estBankDetails: '', estVatRate: '0',
   fneEnabled: false, fneBaseUrl: '', fneTaxCode: '', fneHasApiKey: false, fneApiKeyInput: '', fneCertifying: false,
+  msgCfgEmailEnabled: false, msgCfgGmailUser: '', msgCfgGmailAppPasswordInput: '', msgCfgHasAppPassword: false,
+  msgCfgSmsEnabled: false, msgCfgClientId: '', msgCfgClientSecretInput: '', msgCfgHasClientSecret: false, msgCfgSenderAddress: '',
   receiptView: 'ticket', // 'ticket' (A6) or 'invoice' (A4 Facture) — see renderReceiptModal
   toast: null,
   showReceipt: false, lastReceipt: null,
@@ -365,6 +367,16 @@ async function loadAppState() {
     state.fneEnabled = !!fneConfig.enabled; state.fneBaseUrl = fneConfig.baseUrl || '';
     state.fneTaxCode = fneConfig.taxCode || ''; state.fneHasApiKey = !!fneConfig.hasApiKey;
     state.fneApiKeyInput = '';
+    const msgConfig = data.messagingConfig || {};
+    state.msgCfgEmailEnabled = !!(msgConfig.email && msgConfig.email.enabled);
+    state.msgCfgGmailUser = (msgConfig.email && msgConfig.email.gmailUser) || '';
+    state.msgCfgHasAppPassword = !!(msgConfig.email && msgConfig.email.hasAppPassword);
+    state.msgCfgGmailAppPasswordInput = '';
+    state.msgCfgSmsEnabled = !!(msgConfig.sms && msgConfig.sms.enabled);
+    state.msgCfgClientId = (msgConfig.sms && msgConfig.sms.clientId) || '';
+    state.msgCfgSenderAddress = (msgConfig.sms && msgConfig.sms.senderAddress) || '';
+    state.msgCfgHasClientSecret = !!(msgConfig.sms && msgConfig.sms.hasClientSecret);
+    state.msgCfgClientSecretInput = '';
     // Once a real FNE tax code is configured, it becomes the authoritative
     // rate for the A4 invoice too — otherwise the printed facture and what's
     // actually certified with the DGI could show two different VAT figures.
@@ -1114,6 +1126,9 @@ async function copyDebtorsList() {
   const text = list.map(({ client: c, owed }) => `${c.name} — ${c.phone || 'pas de téléphone'}${c.email ? ' / ' + c.email : ''} — ${fcfa(owed)}`).join('\n');
   await copyText(text, 'Liste des ' + list.length + ' client(s) endetté(s) copiée');
 }
+function channelIsConfigured(channel) {
+  return channel === 'email' ? (state.msgCfgEmailEnabled && state.msgCfgHasAppPassword) : (state.msgCfgSmsEnabled && state.msgCfgHasClientSecret);
+}
 async function markMessageSent(type, recipientIds, productId) {
   try {
     const entry = await api('POST', '/api/messages/log', {
@@ -1121,7 +1136,15 @@ async function markMessageSent(type, recipientIds, productId) {
       subject: state.msgChannel === 'email' ? state.msgSubject : '', productId: productId || '', recordedBy: state.userName,
     });
     state.messageLog.unshift(entry);
-    flashToast('Marqué comme envoyé (' + entry.recipientNames.length + ' destinataire(s))');
+    if (entry.sent) {
+      const okCount = entry.sendResults.filter((r) => r.ok).length;
+      const failCount = entry.sendResults.length - okCount;
+      if (failCount === 0) flashToast('Envoyé avec succès à ' + okCount + ' destinataire(s)');
+      else if (okCount === 0) flashToast("Échec de l'envoi : " + entry.sendResults[0].error);
+      else flashToast(okCount + ' envoyé(s), ' + failCount + ' échec(s) — voir historique');
+    } else {
+      flashToast('Marqué comme envoyé (' + entry.recipientNames.length + ' destinataire(s))');
+    }
     return true;
   } catch (e) { flashToast(e.message); return false; }
 }
@@ -1236,6 +1259,23 @@ async function saveFNEConfig() {
     rerender();
   } catch (e) { flashToast(e.message); }
 }
+
+// ---------- Messagerie (envoi réel des rappels/annonces) ----------
+async function saveMessagingConfig() {
+  try {
+    const cfg = await api('PATCH', '/api/messaging/config', {
+      emailEnabled: state.msgCfgEmailEnabled, gmailUser: state.msgCfgGmailUser, gmailAppPassword: state.msgCfgGmailAppPasswordInput,
+      smsEnabled: state.msgCfgSmsEnabled, clientId: state.msgCfgClientId, clientSecret: state.msgCfgClientSecretInput, senderAddress: state.msgCfgSenderAddress,
+    });
+    state.msgCfgEmailEnabled = cfg.email.enabled; state.msgCfgGmailUser = cfg.email.gmailUser; state.msgCfgHasAppPassword = cfg.email.hasAppPassword;
+    state.msgCfgGmailAppPasswordInput = '';
+    state.msgCfgSmsEnabled = cfg.sms.enabled; state.msgCfgClientId = cfg.sms.clientId; state.msgCfgSenderAddress = cfg.sms.senderAddress;
+    state.msgCfgHasClientSecret = cfg.sms.hasClientSecret; state.msgCfgClientSecretInput = '';
+    flashToast('Configuration de messagerie enregistrée');
+    rerender();
+  } catch (e) { flashToast(e.message); }
+}
+
 async function certifyWithFNE() {
   const r = state.lastReceipt;
   if (!r || state.fneCertifying) return;
@@ -2056,8 +2096,12 @@ function renderCreditPaymentForm() {
 // passes what differs: the recipient summary line, whether a subject field
 // applies, and the send/cancel actions.
 function renderMessageComposeFields(recipientSummaryHtml) {
+  const configured = channelIsConfigured(state.msgChannel);
+  const bannerHtml = configured
+    ? `<div style="grid-column:1/-1;color:var(--green);font-weight:600;font-size:11.5px">✓ Envoi réel activé (${state.msgChannel === 'email' ? 'Gmail' : 'Orange SMS'}) — "Envoyer" enverra vraiment le message.</div>`
+    : `<div style="grid-column:1/-1" class="pos-hint">Aucune passerelle ${state.msgChannel === 'email' ? 'email' : 'SMS'} connectée pour l'instant (configurable sur l'écran Établissement) — copiez le message ci-dessous et envoyez-le manuellement, puis marquez-le comme envoyé.</div>`;
   return `
-    <div style="grid-column:1/-1" class="pos-hint">Aucune passerelle SMS/email connectée pour l'instant (Orange SMS API et Gmail sont prévus) — copiez le message ci-dessous et envoyez-le manuellement, puis marquez-le comme envoyé.</div>
+    ${bannerHtml}
     <div style="grid-column:1/-1">${recipientSummaryHtml}</div>
     <div class="pay-tabs" style="grid-column:1/-1;max-width:220px">
       <div class="pay-tab${state.msgChannel === 'sms' ? ' active' : ''}" data-action="setMsgChannelSms">SMS</div>
@@ -2076,7 +2120,7 @@ function renderCreditReminderForm() {
     ${renderMessageComposeFields(summaryHtml)}
     <div class="save-btn" data-action="copyMsgTextAction">Copier le message</div>
     <div class="add-btn" style="background:#fff;color:var(--green);border:1px solid var(--border)" data-action="copyMsgContactAction">Copier le ${state.msgChannel === 'email' ? 'email' : 'numéro'}</div>
-    <div class="save-btn" style="background:var(--green)" data-action="sendCreditReminderAction">Marquer comme envoyé</div>
+    <div class="save-btn" style="background:var(--green)" data-action="sendCreditReminderAction">${channelIsConfigured(state.msgChannel) ? 'Envoyer' : 'Marquer comme envoyé'}</div>
     <div class="add-btn" style="background:#fff;color:var(--muted);border:1px solid var(--border)" data-action="closeCreditReminderForm">Annuler</div>
   </div>`;
 }
@@ -2108,7 +2152,7 @@ function renderAvailabilityForm() {
     ${renderMessageComposeFields(summaryHtml)}
     <div class="save-btn" data-action="copyMsgTextAction">Copier le message</div>
     <div class="add-btn" style="background:#fff;color:var(--green);border:1px solid var(--border)" data-action="copyAvailabilityContactsAction">Copier les ${state.msgChannel === 'email' ? 'emails' : 'numéros'}</div>
-    <div class="save-btn" style="background:var(--green)" data-action="sendAvailabilityBroadcastAction">Marquer comme envoyé</div>
+    <div class="save-btn" style="background:var(--green)" data-action="sendAvailabilityBroadcastAction">${channelIsConfigured(state.msgChannel) ? 'Envoyer' : 'Marquer comme envoyé'}</div>
     <div class="add-btn" style="background:#fff;color:var(--muted);border:1px solid var(--border)" data-action="toggleAvailabilityForm">Annuler</div>
   </div>`;
 }
@@ -2119,18 +2163,28 @@ function renderMessageLogTable() {
     const recipientsLabel = m.recipientNames.length > 2
       ? m.recipientNames.length + ' destinataires'
       : m.recipientNames.map(esc).join(', ');
+    let statusHtml = '<span class="badge" style="background:#eef0ea;color:#4a5548">Copié manuellement</span>';
+    if (m.sent && Array.isArray(m.sendResults)) {
+      const failCount = m.sendResults.filter((r) => !r.ok).length;
+      statusHtml = failCount === 0
+        ? `<span class="badge ok">Envoyé</span>`
+        : failCount === m.sendResults.length
+          ? `<span class="badge" style="background:var(--danger-bg);color:var(--danger)" title="${esc(m.sendResults[0].error || '')}">Échec</span>`
+          : `<span class="badge warning" title="${esc(m.sendResults.find((r) => !r.ok).error || '')}">${m.sendResults.length - failCount}/${m.sendResults.length} envoyés</span>`;
+    }
     return `<tr>
       <td>${esc(dayLabel(m.sentAt))}</td>
       <td style="font-weight:600">${typeLabel}</td>
       <td class="center">${m.channel === 'email' ? 'Email' : 'SMS'}</td>
       <td>${recipientsLabel}</td>
-      <td style="max-width:280px;white-space:normal;font-size:12.5px;color:var(--muted)">${esc(m.message)}</td>
+      <td style="max-width:260px;white-space:normal;font-size:12.5px;color:var(--muted)">${esc(m.message)}</td>
+      <td class="center">${statusHtml}</td>
       <td>${esc(m.recordedBy) || '—'}</td>
     </tr>`;
   }).join('');
   return `<div class="table-card"><table class="data-table">
-    <tr><th>DATE</th><th>TYPE</th><th class="center">CANAL</th><th>DESTINATAIRES</th><th>MESSAGE</th><th>PAR</th></tr>
-    ${rows || '<tr><td colspan="6" style="text-align:center;color:var(--muted);padding:20px">Aucun message enregistré.</td></tr>'}
+    <tr><th>DATE</th><th>TYPE</th><th class="center">CANAL</th><th>DESTINATAIRES</th><th>MESSAGE</th><th class="center">STATUT</th><th>PAR</th></tr>
+    ${rows || '<tr><td colspan="7" style="text-align:center;color:var(--muted);padding:20px">Aucun message enregistré.</td></tr>'}
   </table></div>`;
 }
 
@@ -2380,6 +2434,7 @@ function renderEtablissement() {
       </div>
     </div>
     ${renderFNEConfigCard()}
+    ${renderMessagingConfigCard()}
   </div>`;
 }
 
@@ -2403,6 +2458,35 @@ function renderFNEConfigCard() {
       <input id="field-fneBaseUrl" class="field-lg" type="text" placeholder="URL de l'API (test par défaut)" value="${esc(state.fneBaseUrl)}" data-bind="fneBaseUrl" />
       <select id="field-fneTaxCode" class="field-lg" data-bind="fneTaxCode">${taxCodeOptions}</select>
       <div class="save-btn" style="padding:11px;justify-content:center" data-action="saveFNEConfig">Enregistrer la configuration FNE</div>
+    </div>
+  </div>`;
+}
+
+function renderMessagingConfigCard() {
+  const passwordPlaceholder = state.msgCfgHasAppPassword ? 'Mot de passe déjà enregistré — laisser vide pour ne pas le changer' : "Mot de passe d'application Gmail (16 caractères)";
+  const secretPlaceholder = state.msgCfgHasClientSecret ? 'Client Secret déjà enregistré — laisser vide pour ne pas le changer' : 'Client Secret Orange';
+  return `<div class="card" style="margin-top:16px">
+    <div class="card-title">Envoi des rappels et annonces (SMS / email)</div>
+    <div style="font-size:12.5px;color:var(--muted);margin-bottom:14px">Une fois activé ici, le bouton "Envoyer" des écrans Notifications envoie réellement le message au lieu de se contenter de le copier.</div>
+    <div style="display:flex;flex-direction:column;gap:10px">
+      <div style="font-size:12.5px;font-weight:700;color:var(--muted)">EMAIL (Gmail)</div>
+      <label style="display:flex;align-items:center;gap:8px;font-size:13px;font-weight:600">
+        <input type="checkbox" data-action="toggleMsgCfgEmailEnabled"${state.msgCfgEmailEnabled ? ' checked' : ''} /> Activer l'envoi par email
+      </label>
+      <input id="field-msgCfgGmailUser" class="field-lg" type="email" placeholder="Adresse Gmail" value="${esc(state.msgCfgGmailUser)}" data-bind="msgCfgGmailUser" />
+      <input id="field-msgCfgGmailAppPasswordInput" class="field-lg" type="password" placeholder="${esc(passwordPlaceholder)}" value="${esc(state.msgCfgGmailAppPasswordInput)}" data-bind="msgCfgGmailAppPasswordInput" autocomplete="off" />
+      <div class="pos-hint" style="margin:0">Le mot de passe d'application se génère sur myaccount.google.com/apppasswords (nécessite la validation en 2 étapes activée sur le compte).</div>
+
+      <div style="font-size:12.5px;font-weight:700;color:var(--muted);margin-top:6px">SMS (Orange SMS API)</div>
+      <label style="display:flex;align-items:center;gap:8px;font-size:13px;font-weight:600">
+        <input type="checkbox" data-action="toggleMsgCfgSmsEnabled"${state.msgCfgSmsEnabled ? ' checked' : ''} /> Activer l'envoi par SMS
+      </label>
+      <input id="field-msgCfgClientId" class="field-lg" type="text" placeholder="Client ID Orange" value="${esc(state.msgCfgClientId)}" data-bind="msgCfgClientId" />
+      <input id="field-msgCfgClientSecretInput" class="field-lg" type="password" placeholder="${esc(secretPlaceholder)}" value="${esc(state.msgCfgClientSecretInput)}" data-bind="msgCfgClientSecretInput" autocomplete="off" />
+      <input id="field-msgCfgSenderAddress" class="field-lg" type="text" placeholder="Numéro expéditeur approuvé (ex: +2250000000)" value="${esc(state.msgCfgSenderAddress)}" data-bind="msgCfgSenderAddress" />
+      <div class="pos-hint" style="margin:0">Identifiants obtenus sur developer.orange.com — le numéro expéditeur doit être approuvé par Orange.</div>
+
+      <div class="save-btn" style="padding:11px;justify-content:center" data-action="saveMessagingConfig">Enregistrer la configuration d'envoi</div>
     </div>
   </div>`;
 }
@@ -2900,6 +2984,9 @@ const Actions = {
   removeLogo: () => { state.estLogo = ''; rerender(); },
   toggleFneEnabled: () => { state.fneEnabled = !state.fneEnabled; rerender(); },
   saveFNEConfig: () => saveFNEConfig(),
+  toggleMsgCfgEmailEnabled: () => { state.msgCfgEmailEnabled = !state.msgCfgEmailEnabled; rerender(); },
+  toggleMsgCfgSmsEnabled: () => { state.msgCfgSmsEnabled = !state.msgCfgSmsEnabled; rerender(); },
+  saveMessagingConfig: () => saveMessagingConfig(),
   certifyWithFNE: () => certifyWithFNE(),
 };
 

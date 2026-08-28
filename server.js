@@ -5,6 +5,7 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const tls = require('tls');
 
 const DEFAULT_PASSWORD = '1234'; // seeded/legacy accounts only — set at creation for new employees
 
@@ -187,7 +188,7 @@ function buildSeed() {
       recordedBy: e.cashier,
     };
   });
-  return { depots, categories, suppliers, products, clients, employees, sales, expenses, messageLog: [], settings: defaultSettings(), fneConfig: defaultFneConfig() };
+  return { depots, categories, suppliers, products, clients, employees, sales, expenses, messageLog: [], settings: defaultSettings(), fneConfig: defaultFneConfig(), messagingConfig: defaultMessagingConfig() };
 }
 
 // Upgrades a pre-multi-dépôt tenant db (flat product.stock, no depots) in
@@ -236,6 +237,7 @@ function migrateTenantData(data) {
   let changed = migrateToDepots(data);
   if (!Array.isArray(data.expenses)) { data.expenses = []; changed = true; }
   if (!Array.isArray(data.messageLog)) { data.messageLog = []; changed = true; }
+  if (!data.messagingConfig) { data.messagingConfig = defaultMessagingConfig(); changed = true; }
   (data.clients || []).forEach((c) => {
     if (c.email === undefined) { c.email = ''; changed = true; }
   });
@@ -347,6 +349,152 @@ function defaultFneConfig() {
 function publicFneConfig(db) {
   const c = db.fneConfig || defaultFneConfig();
   return { enabled: c.enabled, baseUrl: c.baseUrl, taxCode: c.taxCode, hasApiKey: !!c.apiKey };
+}
+
+// ---------- Messaging config (credit reminders / availability broadcasts) ----------
+// Same write-only-secret posture as fneConfig above: gmailAppPassword and
+// clientSecret never reach any client; the rest (which email/sender is
+// configured, whether sending is turned on) is fine to show so the UI can
+// reflect real state without re-typing everything on every visit.
+function defaultMessagingConfig() {
+  return {
+    email: { enabled: false, gmailUser: '', gmailAppPassword: '' },
+    sms: { enabled: false, clientId: '', clientSecret: '', senderAddress: '' },
+  };
+}
+function publicMessagingConfig(db) {
+  const c = db.messagingConfig || defaultMessagingConfig();
+  return {
+    email: { enabled: c.email.enabled, gmailUser: c.email.gmailUser, hasAppPassword: !!c.email.gmailAppPassword },
+    sms: { enabled: c.sms.enabled, clientId: c.sms.clientId, senderAddress: c.sms.senderAddress, hasClientSecret: !!c.sms.clientSecret },
+  };
+}
+
+// ---------- Email sending (Gmail SMTP over raw TLS, no npm dependency) ----------
+// SMTP is a fixed, well-documented text protocol — unlike e.g. QR encoding
+// (deliberately NOT hand-rolled elsewhere in this app, for being easy to get
+// subtly wrong in a way that looks right but isn't), a wrong SMTP command
+// just gets a clear numeric error code back, so implementing it directly
+// against Node's built-in `tls` module is a reasonable way to avoid a new
+// npm dependency (nodemailer) for what is otherwise a zero-dependency app.
+function smtpReadReply(socket) {
+  return new Promise((resolve, reject) => {
+    let buf = '';
+    function onData(chunk) {
+      buf += chunk.toString('utf8');
+      // Only treat the buffer as a complete reply once it actually ends on a
+      // line boundary — checking `lines[last]` alone (without this) could
+      // false-positive-resolve on a reply chunked mid-line by TLS/TCP.
+      if (!buf.endsWith('\r\n')) return;
+      const lines = buf.split('\r\n').filter(Boolean);
+      const last = lines[lines.length - 1];
+      // Multi-line replies use "250-" for every line but the last, which
+      // uses "250 " (space) — only resolve on a non-continuation line.
+      if (last && /^\d{3} /.test(last)) { cleanup(); resolve(buf); }
+    }
+    function onError(e) { cleanup(); reject(e); }
+    function cleanup() { socket.removeListener('data', onData); socket.removeListener('error', onError); }
+    socket.on('data', onData);
+    socket.on('error', onError);
+  });
+}
+function smtpCommand(socket, cmd) {
+  socket.write(cmd + '\r\n');
+  return smtpReadReply(socket);
+}
+// RFC 2047 encoded-word — only needed once a header value has non-ASCII
+// bytes (French accents in a Subject line, mainly); a plain-ASCII value is
+// left untouched so headers stay human-readable in a raw message view.
+function mimeEncodeHeader(str) {
+  if (/^[\x00-\x7F]*$/.test(str)) return str;
+  return '=?UTF-8?B?' + Buffer.from(str, 'utf8').toString('base64') + '?=';
+}
+async function sendEmailViaGmail(cfg, to, subject, textBody) {
+  const socket = tls.connect({ host: 'smtp.gmail.com', port: 465, servername: 'smtp.gmail.com' });
+  socket.setTimeout(15000);
+  try {
+    await new Promise((resolve, reject) => {
+      socket.once('secureConnect', resolve);
+      socket.once('error', reject);
+      socket.once('timeout', () => reject(new Error('Connexion à Gmail expirée')));
+    });
+    await smtpReadReply(socket); // 220 greeting
+    await smtpCommand(socket, 'EHLO boissonman.local');
+    await smtpCommand(socket, 'AUTH LOGIN');
+    await smtpCommand(socket, Buffer.from(cfg.gmailUser, 'utf8').toString('base64'));
+    const authReply = await smtpCommand(socket, Buffer.from(cfg.gmailAppPassword, 'utf8').toString('base64'));
+    if (!/^235/.test(authReply)) {
+      throw new Error("Authentification Gmail refusée — vérifiez l'adresse et le mot de passe d'application");
+    }
+    await smtpCommand(socket, `MAIL FROM:<${cfg.gmailUser}>`);
+    const rcptReply = await smtpCommand(socket, `RCPT TO:<${to}>`);
+    if (!/^25\d/.test(rcptReply)) throw new Error('Adresse destinataire refusée : ' + to);
+    await smtpCommand(socket, 'DATA');
+    // Dot-stuffing: a line starting with "." must be escaped as ".." per the
+    // SMTP transparency rule, or the server would misread it as the
+    // end-of-data marker.
+    const escapedBody = textBody.replace(/\r\n/g, '\n').split('\n')
+      .map((l) => (l.startsWith('.') ? '.' + l : l)).join('\r\n');
+    const message = [
+      `From: ${cfg.gmailUser}`,
+      `To: ${to}`,
+      `Subject: ${mimeEncodeHeader(subject)}`,
+      `Date: ${new Date().toUTCString()}`,
+      'MIME-Version: 1.0',
+      'Content-Type: text/plain; charset=UTF-8',
+      'Content-Transfer-Encoding: 8bit',
+      '',
+      escapedBody,
+      '.',
+    ].join('\r\n');
+    const dataReply = await smtpCommand(socket, message);
+    if (!/^250/.test(dataReply)) throw new Error('Le serveur Gmail a refusé le message');
+    await smtpCommand(socket, 'QUIT');
+  } finally {
+    socket.destroy();
+  }
+}
+
+// ---------- SMS sending (Orange SMS API, OAuth2 client_credentials) ----------
+async function orangeGetToken(cfg) {
+  const basic = Buffer.from(cfg.clientId + ':' + cfg.clientSecret).toString('base64');
+  let res, data;
+  try {
+    res = await fetch('https://api.orange.com/oauth/v3/token', {
+      method: 'POST',
+      headers: { Authorization: 'Basic ' + basic, 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: 'grant_type=client_credentials',
+    });
+    data = await res.json().catch(() => ({}));
+  } catch (e) {
+    throw new Error('Impossible de contacter Orange : ' + e.message);
+  }
+  if (!res.ok || !data.access_token) {
+    throw new Error(data.error_description || data.error || 'Authentification Orange refusée');
+  }
+  return data.access_token;
+}
+async function sendSmsViaOrange(cfg, toPhone, message) {
+  const token = await orangeGetToken(cfg);
+  const sender = cfg.senderAddress.startsWith('tel:') ? cfg.senderAddress : 'tel:' + cfg.senderAddress;
+  const address = toPhone.startsWith('tel:') ? toPhone : 'tel:' + toPhone.replace(/[\s.-]/g, '');
+  let res, data;
+  try {
+    res = await fetch(`https://api.orange.com/smsmessaging/v1/outbound/${encodeURIComponent(sender)}/requests`, {
+      method: 'POST',
+      headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        outboundSMSMessageRequest: { address: [address], senderAddress: sender, outboundSMSTextMessage: { message } },
+      }),
+    });
+    data = await res.json().catch(() => ({}));
+  } catch (e) {
+    throw new Error('Impossible de contacter Orange : ' + e.message);
+  }
+  if (!res.ok) {
+    const exc = (data.requestError && (data.requestError.serviceException || data.requestError.policyException)) || {};
+    throw new Error(exc.text || 'Erreur Orange SMS (' + res.status + ')');
+  }
 }
 
 loadAllTenants();
@@ -584,7 +732,7 @@ function publicEmployee(e) {
 // client-side, but /api/state used to send the raw data anyway to anyone with
 // valid cashier credentials.
 function publicState(db, isManager) {
-  const state = Object.assign({}, db, { employees: db.employees.map(publicEmployee), fneConfig: publicFneConfig(db) });
+  const state = Object.assign({}, db, { employees: db.employees.map(publicEmployee), fneConfig: publicFneConfig(db), messagingConfig: publicMessagingConfig(db) });
   if (!isManager) state.expenses = [];
   return state;
 }
@@ -694,7 +842,7 @@ async function handleApi(req, res, pathname) {
       depots: [{ id: 'd1', name: 'Dépôt principal', address: '' }],
       categories: [], suppliers: [], products: [], clients: [],
       employees: [managerEmployee], sales: [], expenses: [], messageLog: [],
-      settings: defaultSettings(shopName), fneConfig: defaultFneConfig(),
+      settings: defaultSettings(shopName), fneConfig: defaultFneConfig(), messagingConfig: defaultMessagingConfig(),
     };
     tenants.set(tenantId, newDb);
     tenantsMeta.push({ id: tenantId, name: shopName, createdAt: new Date().toISOString() });
@@ -736,6 +884,7 @@ async function handleApi(req, res, pathname) {
     pathname === '/api/expenses' && method === 'POST',
     pathname === '/api/settings' && method === 'PATCH',
     pathname === '/api/fne/config' && method === 'PATCH',
+    pathname === '/api/messaging/config' && method === 'PATCH',
     /^\/api\/employees\/[^/]+(\/toggle)?$/.test(pathname) && method !== 'GET',
     /^\/api\/products\/[^/]+$/.test(pathname) && method === 'DELETE',
     // Client edit stays open to both roles (routine contact-info fixes,
@@ -1320,6 +1469,34 @@ async function handleApi(req, res, pathname) {
       const p = db.products.find((pp) => pp.id === body.productId);
       productName = p ? p.name : '';
     }
+    const subject = (body.subject || '').trim();
+
+    // Real send, only when the shop has actually turned the channel on and
+    // filled in real credentials — otherwise this stays the manual-copy
+    // flow it always was (sendResults stays null, `sent` stays false), with
+    // zero behavior change for a shop that hasn't configured anything.
+    const cfg = db.messagingConfig || defaultMessagingConfig();
+    const canSendReal = channel === 'email'
+      ? !!(cfg.email.enabled && cfg.email.gmailUser && cfg.email.gmailAppPassword)
+      : !!(cfg.sms.enabled && cfg.sms.clientId && cfg.sms.clientSecret && cfg.sms.senderAddress);
+    let sendResults = null;
+    if (canSendReal) {
+      sendResults = [];
+      for (const id of recipientIds) {
+        const c = db.clients.find((cl) => cl.id === id);
+        const contact = c && (channel === 'email' ? c.email : c.phone);
+        if (!c) { sendResults.push({ clientId: id, ok: false, error: 'Client introuvable' }); continue; }
+        if (!contact) { sendResults.push({ clientId: id, ok: false, error: channel === 'email' ? "Pas d'email enregistré" : 'Pas de téléphone enregistré' }); continue; }
+        try {
+          if (channel === 'email') await sendEmailViaGmail(cfg.email, contact, subject, message);
+          else await sendSmsViaOrange(cfg.sms, contact, message);
+          sendResults.push({ clientId: id, ok: true });
+        } catch (e) {
+          sendResults.push({ clientId: id, ok: false, error: e.message });
+        }
+      }
+    }
+
     const entry = {
       id: uid('msg'),
       type,
@@ -1327,15 +1504,42 @@ async function handleApi(req, res, pathname) {
       recipientIds,
       recipientNames,
       message,
-      subject: (body.subject || '').trim(),
+      subject,
       productId: body.productId || '',
       productName,
       recordedBy: body.recordedBy || '',
       sentAt: new Date().toISOString(),
+      sent: canSendReal,
+      sendResults,
     };
     db.messageLog.unshift(entry);
     saveTenant(session.tenantId);
     return sendJSON(res, 201, entry);
+  }
+
+  if (pathname === '/api/messaging/config' && method === 'PATCH') {
+    const body = await readJSONBody(req);
+    const current = db.messagingConfig || defaultMessagingConfig();
+    db.messagingConfig = {
+      email: {
+        enabled: !!body.emailEnabled,
+        gmailUser: (body.gmailUser !== undefined ? body.gmailUser : current.email.gmailUser || '').trim(),
+        // A blank submission keeps the existing password — same write-and-
+        // clear-only-with-an-explicit-value convention as the FNE apiKey and
+        // Établissement logo. Gmail app passwords are shown with spaces in
+        // groups of 4 on Google's own page; strip them since the real
+        // secret has none and a pasted space would break AUTH LOGIN.
+        gmailAppPassword: body.gmailAppPassword ? body.gmailAppPassword.replace(/\s+/g, '') : (current.email.gmailAppPassword || ''),
+      },
+      sms: {
+        enabled: !!body.smsEnabled,
+        clientId: (body.clientId !== undefined ? body.clientId : current.sms.clientId || '').trim(),
+        clientSecret: body.clientSecret ? body.clientSecret.trim() : (current.sms.clientSecret || ''),
+        senderAddress: (body.senderAddress !== undefined ? body.senderAddress : current.sms.senderAddress || '').trim(),
+      },
+    };
+    saveTenant(session.tenantId);
+    return sendJSON(res, 200, publicMessagingConfig(db));
   }
 
   if (pathname === '/api/settings' && method === 'PATCH') {
