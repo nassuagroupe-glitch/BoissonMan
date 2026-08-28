@@ -1477,10 +1477,13 @@ function renderCaisse() {
       ? ` data-action="selectUnit" data-id="${p.id}"`
       : ` data-action="addToCart" data-id="${p.id}" data-unit="detail"`;
     return `<div class="pos-product-card${disabled ? ' disabled' : ''}"${cardAction}>
-      ${p.image ? `<img class="pos-product-image" src="${p.image}" alt="" />` : `<div class="pos-product-dot" style="background:${cat ? cat.color : '#888'}"></div>`}
-      <div class="pos-product-name">${esc(p.name)}</div>
-      <div class="pos-product-stock">${disabled ? 'Rupture de stock' : qty + ' en stock'}</div>
-      <div class="pos-product-price">${fcfa(p.price)}${hasPackaging ? '<span class="pos-packaging-hint">Détail/Paquet/Carton</span>' : ''}</div>
+      <div class="pos-product-info">
+        <div class="pos-product-dot" style="background:${cat ? cat.color : '#888'}"></div>
+        <div class="pos-product-name">${esc(p.name)}</div>
+        <div class="pos-product-stock">${disabled ? 'Rupture de stock' : qty + ' en stock'}</div>
+        <div class="pos-product-price">${fcfa(p.price)}${hasPackaging ? '<span class="pos-packaging-hint">Détail/Paquet/Carton</span>' : ''}</div>
+      </div>
+      ${p.image ? `<img class="pos-product-image" src="${p.image}" alt="" />` : ''}
     </div>`;
   }).join('');
 

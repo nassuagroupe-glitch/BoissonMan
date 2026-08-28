@@ -136,10 +136,11 @@ table.data-table td.center { text-align: center; }
 .pos-tab { padding: 8px 16px; border-radius: 20px; font-size: 12.5px; font-weight: 600; cursor: pointer; background: #fff; color: var(--text); border: 1px solid var(--border); }
 .pos-tab.active { background: var(--green); color: #fff; border: none; }
 .pos-product-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
-.pos-product-card { background: #fff; border: 1px solid var(--border); border-radius: 12px; padding: 14px; cursor: pointer; }
+.pos-product-card { background: #fff; border: 1px solid var(--border); border-radius: 12px; padding: 14px; cursor: pointer; display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .pos-product-card.disabled { cursor: not-allowed; opacity: 0.5; }
+.pos-product-info { min-width: 0; flex: 1; }
 .pos-product-dot { width: 10px; height: 10px; border-radius: 50%; }
-.pos-product-image { display: block; width: 100%; aspect-ratio: 1 / 1; object-fit: cover; border-radius: 8px; margin-bottom: 6px; }
+.pos-product-image { width: 56px; height: 56px; object-fit: cover; border-radius: 8px; flex-shrink: 0; }
 .pos-product-name { font-weight: 700; font-size: 13.5px; margin: 8px 0 3px 0; }
 .pos-product-stock { font-size: 11.5px; color: var(--muted); margin-bottom: 8px; }
 .pos-product-price { font-weight: 800; font-size: 15px; color: var(--green); }
