@@ -100,7 +100,7 @@ const state = {
   scanInput: '', showScanner: false, scanError: null, scanMode: 'sell', scanDevices: [], scanDeviceId: '',
   stockSearch: '', stockCatFilter: 'all', showAddProduct: false,
   npName: '', npBarcode: '', npCategoryId: '', npSupplierId: '', npDepotId: '', npPrice: '', npCost: '', npStock: '', npMinStock: '',
-  npUnitsPerPack: '', npPricePerPack: '', npUnitsPerCarton: '', npPricePerCarton: '', editingProductId: null,
+  npUnitsPerPack: '', npPricePerPack: '', npUnitsPerCarton: '', npPricePerCarton: '', npImage: '', editingProductId: null,
   confirmDeleteProductId: null,
   showImportPreview: false, impFileName: '', impRows: [], impNewCount: 0, impUpdateCount: 0, impParseErrors: [], impResult: null, impBusy: false,
   showAddCategory: false, ncName: '',
@@ -751,7 +751,7 @@ function adjustStock(productId, delta, depotId) {
 function resetProductForm() {
   state.showAddProduct = false; state.editingProductId = null;
   state.npName = ''; state.npBarcode = ''; state.npPrice = ''; state.npCost = ''; state.npStock = ''; state.npMinStock = '';
-  state.npUnitsPerPack = ''; state.npPricePerPack = ''; state.npUnitsPerCarton = ''; state.npPricePerCarton = '';
+  state.npUnitsPerPack = ''; state.npPricePerPack = ''; state.npUnitsPerCarton = ''; state.npPricePerCarton = ''; state.npImage = '';
 }
 function openAddProductForm() {
   resetProductForm();
@@ -769,6 +769,7 @@ function openEditProductForm(id) {
   state.npPrice = p.price; state.npCost = p.cost; state.npMinStock = p.minStock;
   state.npUnitsPerPack = p.unitsPerPack || ''; state.npPricePerPack = p.pricePerPack || '';
   state.npUnitsPerCarton = p.unitsPerCarton || ''; state.npPricePerCarton = p.pricePerCarton || '';
+  state.npImage = p.image || '';
   state.showAddProduct = true;
 }
 function saveProduct() {
@@ -782,6 +783,7 @@ async function addProduct() {
       price: Number(state.npPrice) || 0, cost: Number(state.npCost) || 0, stock: Number(state.npStock) || 0, minStock: Number(state.npMinStock) || 10,
       unitsPerPack: Number(state.npUnitsPerPack) || 0, pricePerPack: Number(state.npPricePerPack) || 0,
       unitsPerCarton: Number(state.npUnitsPerCarton) || 0, pricePerCarton: Number(state.npPricePerCarton) || 0,
+      image: state.npImage,
     });
     state.products.push(product);
     resetProductForm();
@@ -797,6 +799,7 @@ async function updateProduct() {
       price: Number(state.npPrice) || 0, cost: Number(state.npCost) || 0, minStock: Number(state.npMinStock) || 10,
       unitsPerPack: Number(state.npUnitsPerPack) || 0, pricePerPack: Number(state.npPricePerPack) || 0,
       unitsPerCarton: Number(state.npUnitsPerCarton) || 0, pricePerCarton: Number(state.npPricePerCarton) || 0,
+      image: state.npImage,
     });
     const idx = state.products.findIndex((p) => p.id === updated.id);
     if (idx >= 0) state.products[idx] = updated;
@@ -818,6 +821,20 @@ async function deleteProduct(id) {
     rerender();
   }
 }
+// Same cap/pattern as the Établissement logo (MAX_LOGO_FILE_BYTES) — kept
+// comfortably under the server's ~700 000-char MAX_PRODUCT_IMAGE_LENGTH
+// (base64 inflates raw bytes by ~4/3) so an oversized image is rejected
+// here, before an upload, rather than a 400 from the server after the read.
+const MAX_PRODUCT_IMAGE_FILE_BYTES = 500 * 1024;
+function handleProductImageFile(file) {
+  if (!file) return;
+  if (!file.type.startsWith('image/')) { flashToast("L'image du produit doit être une image"); return; }
+  if (file.size > MAX_PRODUCT_IMAGE_FILE_BYTES) { flashToast('Image trop volumineuse (max 500 Ko)'); return; }
+  const reader = new FileReader();
+  reader.onload = () => { state.npImage = reader.result; rerender(); };
+  reader.readAsDataURL(file);
+}
+function removeProductImage() { state.npImage = ''; rerender(); }
 // ---------- Product CSV import/export ----------
 // Delimiter is ';' (not ',') and the export is BOM-prefixed: French-locale
 // Excel (this app's audience) treats ',' as the decimal separator and
@@ -1460,7 +1477,7 @@ function renderCaisse() {
       ? ` data-action="selectUnit" data-id="${p.id}"`
       : ` data-action="addToCart" data-id="${p.id}" data-unit="detail"`;
     return `<div class="pos-product-card${disabled ? ' disabled' : ''}"${cardAction}>
-      <div class="pos-product-dot" style="background:${cat ? cat.color : '#888'}"></div>
+      ${p.image ? `<img class="pos-product-image" src="${p.image}" alt="" />` : `<div class="pos-product-dot" style="background:${cat ? cat.color : '#888'}"></div>`}
       <div class="pos-product-name">${esc(p.name)}</div>
       <div class="pos-product-stock">${disabled ? 'Rupture de stock' : qty + ' en stock'}</div>
       <div class="pos-product-price">${fcfa(p.price)}${hasPackaging ? '<span class="pos-packaging-hint">Détail/Paquet/Carton</span>' : ''}</div>
@@ -1556,7 +1573,7 @@ function renderStocks() {
       ? ` <span style="font-size:11px;color:var(--danger);font-weight:600">Supprimer ?</span> <span style="cursor:pointer;color:var(--danger);vertical-align:middle" data-action="confirmDeleteProduct" data-id="${p.id}" title="Confirmer">${ICON_CHECK}</span> <span style="cursor:pointer;color:var(--muted);vertical-align:middle" data-action="cancelDeleteProduct" title="Annuler">${ICON_CLOSE}</span>`
       : ` <span style="cursor:pointer;color:var(--muted);vertical-align:middle" data-action="editProduct" data-id="${p.id}" title="Modifier">${ICON_EDIT}</span>${state.role === 'manager' ? ` <span style="cursor:pointer;color:var(--danger);vertical-align:middle" data-action="askDeleteProduct" data-id="${p.id}" title="Supprimer">${ICON_TRASH}</span>` : ''}`;
     return `<tr>
-      <td style="font-weight:600">${esc(p.name)}${nameActionsHtml}${packagingHint}</td>
+      <td style="font-weight:600">${p.image ? `<img class="product-thumb" src="${p.image}" alt="" />` : ''}${esc(p.name)}${nameActionsHtml}${packagingHint}</td>
       <td><span class="dot" style="background:${cat ? cat.color : '#888'}"></span>${cat ? esc(cat.name) : '—'}</td>
       <td class="right">${fcfa(p.price)}</td>
       <td class="center" style="font-weight:700">${qty}</td>
@@ -1573,6 +1590,11 @@ function renderStocks() {
       <div class="camera-btn" data-action="openScanner" data-mode="register" title="Scanner avec une caméra (webcam ou téléphone)">${ICON_CAMERA}</div>
     </div>
     <div class="pos-hint" style="grid-column:1/-1;margin:0">Astuce : cliquez dans le champ code-barres puis scannez le produit avec un lecteur USB — le code s'y saisit tout seul. Ou utilisez le bouton caméra pour scanner avec une webcam ou un téléphone connecté au PC. Laissez vide pour générer un code interne automatiquement.</div>
+    <div style="grid-column:1/-1;display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+      ${state.npImage ? `<div class="product-image-preview"><img src="${state.npImage}" alt="" /></div>` : ''}
+      <input id="field-npImageFile" type="file" accept="image/*" data-bind="npImageFile" />
+      ${state.npImage ? `<span style="cursor:pointer;color:var(--danger);font-size:12.5px;font-weight:600" data-action="removeProductImage">Supprimer l'image</span>` : ''}
+    </div>
     <select id="field-npCategoryId" class="field" data-bind="npCategoryId">${npCatOptions}</select>
     <select id="field-npSupplierId" class="field" data-bind="npSupplierId">${npSupOptions}</select>
     ${isEditingProduct ? '' : `<select id="field-npDepotId" class="field" data-bind="npDepotId" title="Dépôt de réception du stock initial">${npDepotOptions}</select>`}
@@ -2491,6 +2513,7 @@ const Actions = {
   openScanner: (ds) => { state.showScanner = true; state.scanMode = (ds && ds.mode) || 'sell'; state.scanError = null; rerender(); },
   closeScanner: () => { state.showScanner = false; state.scanError = null; rerender(); },
   toggleAddProduct: () => { if (state.showAddProduct) resetProductForm(); else openAddProductForm(); rerender(); },
+  removeProductImage: () => removeProductImage(),
   exportProductsCsv: () => exportProductsCsv(),
   triggerImportFile: () => { const el = document.getElementById('field-impFile'); if (el) el.click(); },
   confirmImportProducts: () => confirmImportProducts(),
@@ -2584,6 +2607,10 @@ function onChange(e) {
   const el = e.target;
   if (el.type === 'file' && el.dataset && el.dataset.bind === 'estLogoFile') {
     handleLogoFile(el.files && el.files[0]);
+    return;
+  }
+  if (el.type === 'file' && el.dataset && el.dataset.bind === 'npImageFile') {
+    handleProductImageFile(el.files && el.files[0]);
     return;
   }
   if (el.type === 'file' && el.dataset && el.dataset.bind === 'impFile') {

@@ -139,6 +139,7 @@ table.data-table td.center { text-align: center; }
 .pos-product-card { background: #fff; border: 1px solid var(--border); border-radius: 12px; padding: 14px; cursor: pointer; }
 .pos-product-card.disabled { cursor: not-allowed; opacity: 0.5; }
 .pos-product-dot { width: 10px; height: 10px; border-radius: 50%; }
+.pos-product-image { display: block; width: 100%; aspect-ratio: 1 / 1; object-fit: cover; border-radius: 8px; margin-bottom: 6px; }
 .pos-product-name { font-weight: 700; font-size: 13.5px; margin: 8px 0 3px 0; }
 .pos-product-stock { font-size: 11.5px; color: var(--muted); margin-bottom: 8px; }
 .pos-product-price { font-weight: 800; font-size: 15px; color: var(--green); }
@@ -209,6 +210,9 @@ table.data-table td.center { text-align: center; }
 .receipt-brand-sub { font-size: 11px; color: var(--muted); }
 .est-logo-preview { width: 72px; height: 72px; border-radius: 10px; border: 1px solid var(--border); overflow: hidden; margin-bottom: 10px; }
 .est-logo-preview img { width: 100%; height: 100%; object-fit: cover; }
+.product-image-preview { width: 56px; height: 56px; border-radius: 8px; border: 1px solid var(--border); overflow: hidden; flex-shrink: 0; }
+.product-image-preview img { width: 100%; height: 100%; object-fit: cover; }
+.product-thumb { width: 28px; height: 28px; border-radius: 6px; object-fit: cover; vertical-align: middle; margin-right: 8px; }
 .receipt-meta { border-top: 1px dashed #d8d0c0; border-bottom: 1px dashed #d8d0c0; padding: 8px 0; margin-bottom: 10px; font-size: 11.5px; color: #4a5548; display: flex; flex-direction: column; gap: 3px; }
 .receipt-meta-row { display: flex; justify-content: space-between; }
 .receipt-items { display: flex; flex-direction: column; gap: 7px; margin-bottom: 10px; }

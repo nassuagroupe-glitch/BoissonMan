@@ -368,6 +368,11 @@ function defaultSettings(companyName) {
 // cap so an oversized upload gets a clean 400 instead of the request being
 // silently destroyed mid-read.
 const MAX_LOGO_LENGTH = 700000;
+// Same data:-URI-inline, same-order-of-magnitude cap as the logo above,
+// just per-product instead of per-tenant. Product create/update use the
+// default 1MB readJSONBody cap, so this leaves headroom for the rest of
+// a normal product payload alongside the image.
+const MAX_PRODUCT_IMAGE_LENGTH = 700000;
 function sendJSON(res, status, data) {
   const body = JSON.stringify(data);
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -884,6 +889,9 @@ async function handleApi(req, res, pathname) {
     if (scannedBarcode && db.products.some((p) => p.barcode === scannedBarcode)) {
       return sendJSON(res, 400, { error: 'Ce code-barres est déjà utilisé par un autre produit' });
     }
+    if (typeof body.image === 'string' && body.image.length > MAX_PRODUCT_IMAGE_LENGTH) {
+      return sendJSON(res, 400, { error: 'Image trop volumineuse (taille maximale ~500 Ko)' });
+    }
     const initialDepotId = body.depotId || (db.depots[0] && db.depots[0].id) || '';
     const stockByDepot = {};
     db.depots.forEach((d) => { stockByDepot[d.id] = d.id === initialDepotId ? (Number(body.stock) || 0) : 0; });
@@ -901,6 +909,7 @@ async function handleApi(req, res, pathname) {
       pricePerPack: Number(body.pricePerPack) || 0,
       unitsPerCarton: Number(body.unitsPerCarton) || 0,
       pricePerCarton: Number(body.pricePerCarton) || 0,
+      image: typeof body.image === 'string' ? body.image : '',
     };
     db.products.push(product);
     saveTenant(session.tenantId);
@@ -933,6 +942,16 @@ async function handleApi(req, res, pathname) {
     if (body.pricePerPack !== undefined) product.pricePerPack = Number(body.pricePerPack) || 0;
     if (body.unitsPerCarton !== undefined) product.unitsPerCarton = Number(body.unitsPerCarton) || 0;
     if (body.pricePerCarton !== undefined) product.pricePerCarton = Number(body.pricePerCarton) || 0;
+    if (body.image !== undefined) {
+      // Unlike barcode above, an empty string is a valid, intentional value
+      // here (the form's "Supprimer l'image" link) — same write-and-clear
+      // convention as the Établissement logo, not the "blank = untouched"
+      // rule most other fields on this route follow.
+      if (typeof body.image === 'string' && body.image.length > MAX_PRODUCT_IMAGE_LENGTH) {
+        return sendJSON(res, 400, { error: 'Image trop volumineuse (taille maximale ~500 Ko)' });
+      }
+      product.image = typeof body.image === 'string' ? body.image : '';
+    }
     saveTenant(session.tenantId);
     return sendJSON(res, 200, product);
   }
