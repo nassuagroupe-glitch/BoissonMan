@@ -474,10 +474,18 @@ async function orangeGetToken(cfg) {
   }
   return data.access_token;
 }
+// Orange's `tel:` URIs need E.164 (a leading "+"); numbers are commonly
+// typed/copied with the "00" international-access-code prefix instead
+// (e.g. "002250747666848"), which normalizes to the same "+2250747...".
+function toTelUri(phone) {
+  if (phone.startsWith('tel:')) return phone;
+  const digits = phone.replace(/[\s.-]/g, '');
+  return 'tel:' + (digits.startsWith('00') ? '+' + digits.slice(2) : digits);
+}
 async function sendSmsViaOrange(cfg, toPhone, message) {
   const token = await orangeGetToken(cfg);
-  const sender = cfg.senderAddress.startsWith('tel:') ? cfg.senderAddress : 'tel:' + cfg.senderAddress;
-  const address = toPhone.startsWith('tel:') ? toPhone : 'tel:' + toPhone.replace(/[\s.-]/g, '');
+  const sender = toTelUri(cfg.senderAddress);
+  const address = toTelUri(toPhone);
   let res, data;
   try {
     res = await fetch(`https://api.orange.com/smsmessaging/v1/outbound/${encodeURIComponent(sender)}/requests`, {
@@ -492,8 +500,12 @@ async function sendSmsViaOrange(cfg, toPhone, message) {
     throw new Error('Impossible de contacter Orange : ' + e.message);
   }
   if (!res.ok) {
+    // The human-readable detail (e.g. "Expired contract...") lives in
+    // `variables[0]`, not `text` — `text` is just the generic
+    // "A policy error occurred. Error code is %1" template string.
     const exc = (data.requestError && (data.requestError.serviceException || data.requestError.policyException)) || {};
-    throw new Error(exc.text || 'Erreur Orange SMS (' + res.status + ')');
+    const detail = (Array.isArray(exc.variables) && exc.variables[0]) || exc.text;
+    throw new Error(detail || 'Erreur Orange SMS (' + res.status + ')');
   }
 }
 
