@@ -746,7 +746,13 @@ function publicEmployee(e) {
 // valid cashier credentials.
 function publicState(db, isManager) {
   const state = Object.assign({}, db, { employees: db.employees.map(publicEmployee), fneConfig: publicFneConfig(db), messagingConfig: publicMessagingConfig(db) });
-  if (!isManager) state.expenses = [];
+  if (!isManager) {
+    state.expenses = [];
+    // Cost (prix d'achat) is margin/business data — cashiers get read-only
+    // stock visibility (see MANAGER_ONLY below) but must never see it, not
+    // even via the network response for a hidden UI field.
+    state.products = db.products.map((p) => { const { cost, ...rest } = p; return rest; });
+  }
   return state;
 }
 // Finds which tenant a login username (phone or name, case-insensitive)
@@ -888,7 +894,9 @@ async function handleApi(req, res, pathname) {
   const isManager = session.role === 'manager';
   // Mirrors NAV_ITEMS' managerOnly flags in app.js (Dépôts, Fournisseurs,
   // Employés, Dépenses) plus stock-transfer, which is manager-gated the
-  // same way client-side. Every other route stays open to both roles.
+  // same way client-side, plus every product-catalog/stock-quantity mutation
+  // (cashiers get read-only stock visibility, no changes at all). Every
+  // other route stays open to both roles.
   const MANAGER_ONLY = [
     pathname === '/api/depots' && method === 'POST',
     pathname === '/api/suppliers' && method === 'POST',
@@ -899,15 +907,22 @@ async function handleApi(req, res, pathname) {
     pathname === '/api/fne/config' && method === 'PATCH',
     pathname === '/api/messaging/config' && method === 'PATCH',
     /^\/api\/employees\/[^/]+(\/toggle)?$/.test(pathname) && method !== 'GET',
+    // Cashiers get read-only stock visibility: no add/edit/delete on the
+    // catalog and no quantity adjustments (the stepper/restock endpoint
+    // below), full stop — not just the pre-existing delete/transfer/import
+    // gates.
+    pathname === '/api/products' && method === 'POST',
+    /^\/api\/products\/[^/]+$/.test(pathname) && method === 'PATCH',
     /^\/api\/products\/[^/]+$/.test(pathname) && method === 'DELETE',
+    /^\/api\/products\/[^/]+\/stock$/.test(pathname) && method === 'PATCH',
     // Client edit stays open to both roles (routine contact-info fixes,
     // same tier as product edit); delete is manager-gated like product
     // delete — removing a customer record entirely is more structurally
     // impactful than fixing their phone number.
     /^\/api\/clients\/[^/]+$/.test(pathname) && method === 'DELETE',
-    // Bulk create/update plus auto-creating categories/suppliers as a side
-    // effect is more structurally impactful than a single product add/edit
-    // (which stays open to both roles) — same reasoning as DELETE above.
+    // Redundant with the single-product POST gate above now that product
+    // add/edit is manager-only too, but kept explicit rather than relying on
+    // that overlap.
     pathname === '/api/products/import' && method === 'POST',
   ].some(Boolean);
   if (MANAGER_ONLY && !isManager) {

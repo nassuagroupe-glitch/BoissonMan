@@ -1753,6 +1753,11 @@ function renderCaisse() {
 }
 
 function renderStocks() {
+  // Cashiers get read-only stock visibility: no add/edit/delete, no stepper,
+  // no restock/transfer/CSV import-export — just the table, search, and
+  // filters. Enforced server-side too (see MANAGER_ONLY in server.js); this
+  // is just so a cashier never even sees a control that would 403.
+  const isManager = state.role === 'manager';
   const catOptions = state.categories.map((c) => `<option value="${c.id}"${state.stockCatFilter === c.id ? ' selected' : ''}>${esc(c.name)}</option>`).join('');
   const npCatOptions = state.categories.map((c) => `<option value="${c.id}"${state.npCategoryId === c.id ? ' selected' : ''}>${esc(c.name)}</option>`).join('');
   const npSupOptions = state.suppliers.map((s) => `<option value="${s.id}"${state.npSupplierId === s.id ? ' selected' : ''}>${esc(s.name)}</option>`).join('');
@@ -1771,7 +1776,7 @@ function renderStocks() {
     const cat = catById[p.categoryId];
     const qty = filterId === 'all' ? stockTotal(p) : stockAt(p, filterId);
     const st = stockStatus(qty, p.minStock);
-    const adjustHtml = filterId === 'all'
+    const adjustHtml = !isManager ? '' : filterId === 'all'
       ? `<span style="color:var(--muted);font-size:12px">tous dépôts</span>`
       : `<div class="stepper">
           <div class="stepper-btn" data-action="stockDec" data-id="${p.id}">−</div>
@@ -1780,9 +1785,9 @@ function renderStocks() {
         </div>`;
     const packagingHint = (p.unitsPerPack > 1 || p.unitsPerCarton > 1)
       ? `<div style="font-size:10.5px;color:var(--muted)">${p.unitsPerPack > 1 ? `paquet ${p.unitsPerPack}` : ''}${p.unitsPerPack > 1 && p.unitsPerCarton > 1 ? ' · ' : ''}${p.unitsPerCarton > 1 ? `carton ${p.unitsPerCarton}` : ''}</div>` : '';
-    const nameActionsHtml = state.confirmDeleteProductId === p.id
+    const nameActionsHtml = !isManager ? '' : state.confirmDeleteProductId === p.id
       ? ` <span style="font-size:11px;color:var(--danger);font-weight:600">Supprimer ?</span> <span style="cursor:pointer;color:var(--danger);vertical-align:middle" data-action="confirmDeleteProduct" data-id="${p.id}" title="Confirmer">${ICON_CHECK}</span> <span style="cursor:pointer;color:var(--muted);vertical-align:middle" data-action="cancelDeleteProduct" title="Annuler">${ICON_CLOSE}</span>`
-      : ` <span style="cursor:pointer;color:var(--muted);vertical-align:middle" data-action="editProduct" data-id="${p.id}" title="Modifier">${ICON_EDIT}</span>${state.role === 'manager' ? ` <span style="cursor:pointer;color:var(--danger);vertical-align:middle" data-action="askDeleteProduct" data-id="${p.id}" title="Supprimer">${ICON_TRASH}</span>` : ''}`;
+      : ` <span style="cursor:pointer;color:var(--muted);vertical-align:middle" data-action="editProduct" data-id="${p.id}" title="Modifier">${ICON_EDIT}</span> <span style="cursor:pointer;color:var(--danger);vertical-align:middle" data-action="askDeleteProduct" data-id="${p.id}" title="Supprimer">${ICON_TRASH}</span>`;
     return `<tr>
       <td style="font-weight:600">${p.image ? `<img class="product-thumb" src="${p.image}" alt="" />` : ''}${esc(p.name)}${nameActionsHtml}${packagingHint}</td>
       <td><span class="dot" style="background:${cat ? cat.color : '#888'}"></span>${cat ? esc(cat.name) : '—'}</td>
@@ -1790,12 +1795,12 @@ function renderStocks() {
       <td class="right">${fcfa(p.price)}</td>
       <td class="center" style="font-weight:700">${qty}</td>
       <td class="center"><span class="badge ${st.cls}">${st.label}</span></td>
-      <td class="center">${adjustHtml}</td>
+      ${isManager ? `<td class="center">${adjustHtml}</td>` : ''}
     </tr>`;
   }).join('');
 
   const isEditingProduct = !!state.editingProductId;
-  const addFormHtml = state.showAddProduct ? `<div class="add-form cols-4">
+  const addFormHtml = isManager && state.showAddProduct ? `<div class="add-form cols-4">
     <input id="field-npName" class="field" type="text" placeholder="Nom du produit" value="${esc(state.npName)}" data-bind="npName" />
     <div style="display:flex;gap:6px">
       <input id="field-npBarcode" class="field" style="flex:1" type="text" placeholder="Code-barres (scanner USB ou saisir)" autofocus value="${esc(state.npBarcode)}" data-bind="npBarcode" />
@@ -1822,8 +1827,8 @@ function renderStocks() {
     <div class="save-btn" data-action="saveProduct">${isEditingProduct ? 'Mettre à jour' : 'Enregistrer'}</div>
   </div>` : '';
 
-  const transferHtml = state.showTransfer && state.role === 'manager' ? renderTransferForm() : '';
-  const restockHtml = state.showRestock ? renderRestockForm() : '';
+  const transferHtml = isManager && state.showTransfer ? renderTransferForm() : '';
+  const restockHtml = isManager && state.showRestock ? renderRestockForm() : '';
 
   return `<div>
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;flex-wrap:wrap;gap:10px">
@@ -1835,20 +1840,20 @@ function renderStocks() {
         </select>
         ${renderDepotFilter('stockDepotFilter', true)}
       </div>
-      <div style="display:flex;gap:10px">
-        ${state.depots.length > 1 && state.role === 'manager' ? `<div class="add-btn" style="background:#fff;color:var(--green);border:1px solid var(--border)" data-action="toggleTransfer">⇄ Transférer du stock</div>` : ''}
+      ${isManager ? `<div style="display:flex;gap:10px">
+        ${state.depots.length > 1 ? `<div class="add-btn" style="background:#fff;color:var(--green);border:1px solid var(--border)" data-action="toggleTransfer">⇄ Transférer du stock</div>` : ''}
         <div class="add-btn" style="background:#fff;color:var(--green);border:1px solid var(--border)" data-action="toggleRestock">↓ Réapprovisionner</div>
         <div class="add-btn" style="background:#fff;color:var(--green);border:1px solid var(--border)" data-action="exportProductsCsv" title="Télécharger le catalogue en CSV">↓ Exporter CSV</div>
-        ${state.role === 'manager' ? `<div class="add-btn" style="background:#fff;color:var(--green);border:1px solid var(--border)" data-action="triggerImportFile" title="Importer un fichier CSV">↑ Importer CSV</div>
-        <input id="field-impFile" type="file" accept=".csv,text/csv" data-bind="impFile" style="display:none" />` : ''}
+        <div class="add-btn" style="background:#fff;color:var(--green);border:1px solid var(--border)" data-action="triggerImportFile" title="Importer un fichier CSV">↑ Importer CSV</div>
+        <input id="field-impFile" type="file" accept=".csv,text/csv" data-bind="impFile" style="display:none" />
         <div class="add-btn" data-action="toggleAddProduct">+ Ajouter un produit</div>
-      </div>
+      </div>` : ''}
     </div>
     ${transferHtml}
     ${restockHtml}
     ${addFormHtml}
     <div class="table-card"><table class="data-table">
-      <tr><th>PRODUIT</th><th>CATÉGORIE</th><th>EMPLACEMENT</th><th class="right">PRIX</th><th class="center">STOCK</th><th class="center">STATUT</th><th class="center">AJUSTER</th></tr>
+      <tr><th>PRODUIT</th><th>CATÉGORIE</th><th>EMPLACEMENT</th><th class="right">PRIX</th><th class="center">STOCK</th><th class="center">STATUT</th>${isManager ? '<th class="center">AJUSTER</th>' : ''}</tr>
       ${rowsHtml}
     </table></div>
   </div>`;
