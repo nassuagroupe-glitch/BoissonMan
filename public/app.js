@@ -103,7 +103,7 @@ const state = {
   scanInput: '', showScanner: false, scanError: null, scanMode: 'sell', scanDevices: [], scanDeviceId: '',
   stockSearch: '', stockCatFilter: 'all', showAddProduct: false,
   npName: '', npBarcode: '', npCategoryId: '', npSupplierId: '', npDepotId: '', npPrice: '', npCost: '', npStock: '', npMinStock: '',
-  npUnitsPerPack: '', npPricePerPack: '', npUnitsPerCarton: '', npPricePerCarton: '', npImage: '', editingProductId: null,
+  npUnitsPerPack: '', npPricePerPack: '', npUnitsPerCarton: '', npPricePerCarton: '', npImage: '', npLocation: '', editingProductId: null,
   confirmDeleteProductId: null,
   showImportPreview: false, impFileName: '', impRows: [], impNewCount: 0, impUpdateCount: 0, impParseErrors: [], impResult: null, impBusy: false,
   showAddCategory: false, ncName: '',
@@ -769,7 +769,7 @@ function adjustStock(productId, delta, depotId) {
 function resetProductForm() {
   state.showAddProduct = false; state.editingProductId = null;
   state.npName = ''; state.npBarcode = ''; state.npPrice = ''; state.npCost = ''; state.npStock = ''; state.npMinStock = '';
-  state.npUnitsPerPack = ''; state.npPricePerPack = ''; state.npUnitsPerCarton = ''; state.npPricePerCarton = ''; state.npImage = '';
+  state.npUnitsPerPack = ''; state.npPricePerPack = ''; state.npUnitsPerCarton = ''; state.npPricePerCarton = ''; state.npImage = ''; state.npLocation = '';
 }
 function openAddProductForm() {
   resetProductForm();
@@ -787,7 +787,7 @@ function openEditProductForm(id) {
   state.npPrice = p.price; state.npCost = p.cost; state.npMinStock = p.minStock;
   state.npUnitsPerPack = p.unitsPerPack || ''; state.npPricePerPack = p.pricePerPack || '';
   state.npUnitsPerCarton = p.unitsPerCarton || ''; state.npPricePerCarton = p.pricePerCarton || '';
-  state.npImage = p.image || '';
+  state.npImage = p.image || ''; state.npLocation = p.location || '';
   state.showAddProduct = true;
 }
 function saveProduct() {
@@ -801,7 +801,7 @@ async function addProduct() {
       price: Number(state.npPrice) || 0, cost: Number(state.npCost) || 0, stock: Number(state.npStock) || 0, minStock: Number(state.npMinStock) || 10,
       unitsPerPack: Number(state.npUnitsPerPack) || 0, pricePerPack: Number(state.npPricePerPack) || 0,
       unitsPerCarton: Number(state.npUnitsPerCarton) || 0, pricePerCarton: Number(state.npPricePerCarton) || 0,
-      image: state.npImage,
+      image: state.npImage, location: state.npLocation.trim(),
     });
     state.products.push(product);
     resetProductForm();
@@ -817,7 +817,7 @@ async function updateProduct() {
       price: Number(state.npPrice) || 0, cost: Number(state.npCost) || 0, minStock: Number(state.npMinStock) || 10,
       unitsPerPack: Number(state.npUnitsPerPack) || 0, pricePerPack: Number(state.npPricePerPack) || 0,
       unitsPerCarton: Number(state.npUnitsPerCarton) || 0, pricePerCarton: Number(state.npPricePerCarton) || 0,
-      image: state.npImage,
+      image: state.npImage, location: state.npLocation.trim(),
     });
     const idx = state.products.findIndex((p) => p.id === updated.id);
     if (idx >= 0) state.products[idx] = updated;
@@ -861,7 +861,7 @@ function removeProductImage() { state.npImage = ''; rerender(); }
 // accented characters (é, à, ô — this whole app is French) to render
 // correctly instead of mojibake.
 const CSV_DELIMITER = ';';
-const PRODUCT_CSV_COLUMNS = ['ID', 'Nom', 'Catégorie', 'Fournisseur', 'Prix vente', 'Prix achat', 'Stock minimum', 'Code-barres', 'Unités/Paquet', 'Prix Paquet', 'Unités/Carton', 'Prix Carton'];
+const PRODUCT_CSV_COLUMNS = ['ID', 'Nom', 'Catégorie', 'Fournisseur', 'Prix vente', 'Prix achat', 'Stock minimum', 'Code-barres', 'Emplacement', 'Unités/Paquet', 'Prix Paquet', 'Unités/Carton', 'Prix Carton'];
 function csvEscape(cell) {
   const s = cell === undefined || cell === null ? '' : String(cell);
   if (s.includes(CSV_DELIMITER) || s.includes(',') || s.includes('"') || s.includes('\n') || s.includes('\r')) {
@@ -878,7 +878,7 @@ function buildProductsCsv() {
   state.products.forEach((p) => {
     const row = [
       p.id, p.name, catById[p.categoryId] || '', supById[p.supplierId] || '',
-      p.price, p.cost, p.minStock, p.barcode,
+      p.price, p.cost, p.minStock, p.barcode, p.location || '',
       p.unitsPerPack || '', p.pricePerPack || '', p.unitsPerCarton || '', p.pricePerCarton || '',
     ];
     state.depots.forEach((d) => row.push(stockAt(p, d.id)));
@@ -971,7 +971,7 @@ function rowsToImportPayload(parsedRows, depots) {
     payload.push({
       id, name: r['Nom'], categoryName: r['Catégorie'], supplierName: r['Fournisseur'],
       price: parseImportNumber(r['Prix vente'], delimiter), cost: parseImportNumber(r['Prix achat'], delimiter),
-      minStock: parseImportNumber(r['Stock minimum'], delimiter), barcode: r['Code-barres'],
+      minStock: parseImportNumber(r['Stock minimum'], delimiter), barcode: r['Code-barres'], location: r['Emplacement'],
       unitsPerPack: parseImportNumber(r['Unités/Paquet'], delimiter), pricePerPack: parseImportNumber(r['Prix Paquet'], delimiter),
       unitsPerCarton: parseImportNumber(r['Unités/Carton'], delimiter), pricePerCarton: parseImportNumber(r['Prix Carton'], delimiter),
       stockByDepotName,
@@ -1761,7 +1761,10 @@ function renderStocks() {
   const filterId = state.stockDepotFilter || 'all';
   let list = state.products;
   if (state.stockCatFilter !== 'all') list = list.filter((p) => p.categoryId === state.stockCatFilter);
-  if (state.stockSearch.trim()) list = list.filter((p) => p.name.toLowerCase().includes(state.stockSearch.trim().toLowerCase()));
+  if (state.stockSearch.trim()) {
+    const q = state.stockSearch.trim().toLowerCase();
+    list = list.filter((p) => p.name.toLowerCase().includes(q) || (p.location || '').toLowerCase().includes(q));
+  }
   const catById = {}; state.categories.forEach((c) => { catById[c.id] = c; });
 
   const rowsHtml = list.map((p) => {
@@ -1783,6 +1786,7 @@ function renderStocks() {
     return `<tr>
       <td style="font-weight:600">${p.image ? `<img class="product-thumb" src="${p.image}" alt="" />` : ''}${esc(p.name)}${nameActionsHtml}${packagingHint}</td>
       <td><span class="dot" style="background:${cat ? cat.color : '#888'}"></span>${cat ? esc(cat.name) : '—'}</td>
+      <td>${p.location ? esc(p.location) : '<span style="color:var(--muted)">—</span>'}</td>
       <td class="right">${fcfa(p.price)}</td>
       <td class="center" style="font-weight:700">${qty}</td>
       <td class="center"><span class="badge ${st.cls}">${st.label}</span></td>
@@ -1810,6 +1814,7 @@ function renderStocks() {
     <input id="field-npCost" class="field" type="number" placeholder="Prix achat (FCFA)" value="${esc(state.npCost)}" data-bind="npCost" />
     ${isEditingProduct ? '' : `<input id="field-npStock" class="field" type="number" placeholder="Stock initial" value="${esc(state.npStock)}" data-bind="npStock" />`}
     <input id="field-npMinStock" class="field" type="number" placeholder="Seuil minimum" value="${esc(state.npMinStock)}" data-bind="npMinStock" />
+    <input id="field-npLocation" class="field" type="text" placeholder="Emplacement en magasin (ex: Allée 3, Étagère B)" value="${esc(state.npLocation)}" data-bind="npLocation" />
     <input id="field-npUnitsPerPack" class="field" type="number" placeholder="Unités par paquet (optionnel)" value="${esc(state.npUnitsPerPack)}" data-bind="npUnitsPerPack" />
     <input id="field-npPricePerPack" class="field" type="number" placeholder="Prix du paquet (FCFA)" value="${esc(state.npPricePerPack)}" data-bind="npPricePerPack" />
     <input id="field-npUnitsPerCarton" class="field" type="number" placeholder="Unités par carton (optionnel)" value="${esc(state.npUnitsPerCarton)}" data-bind="npUnitsPerCarton" />
@@ -1843,7 +1848,7 @@ function renderStocks() {
     ${restockHtml}
     ${addFormHtml}
     <div class="table-card"><table class="data-table">
-      <tr><th>PRODUIT</th><th>CATÉGORIE</th><th class="right">PRIX</th><th class="center">STOCK</th><th class="center">STATUT</th><th class="center">AJUSTER</th></tr>
+      <tr><th>PRODUIT</th><th>CATÉGORIE</th><th>EMPLACEMENT</th><th class="right">PRIX</th><th class="center">STOCK</th><th class="center">STATUT</th><th class="center">AJUSTER</th></tr>
       ${rowsHtml}
     </table></div>
   </div>`;
