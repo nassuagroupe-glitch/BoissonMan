@@ -103,7 +103,7 @@ const state = {
   scanInput: '', showScanner: false, scanError: null, scanMode: 'sell', scanDevices: [], scanDeviceId: '',
   stockSearch: '', stockCatFilter: 'all', showAddProduct: false,
   npName: '', npBarcode: '', npCategoryId: '', npSupplierId: '', npDepotId: '', npPrice: '', npCost: '', npStock: '', npMinStock: '',
-  npUnitsPerPack: '', npPricePerPack: '', npUnitsPerCarton: '', npPricePerCarton: '', npImage: '', npLocation: '', editingProductId: null,
+  npUnitsPerPack: '', npPricePerPack: '', npUnitsPerCarton: '', npPricePerCarton: '', npImage: '', npLocation: '', npWeight: '', editingProductId: null,
   confirmDeleteProductId: null,
   showImportPreview: false, impFileName: '', impRows: [], impNewCount: 0, impUpdateCount: 0, impParseErrors: [], impResult: null, impBusy: false,
   showAddCategory: false, ncName: '',
@@ -769,7 +769,7 @@ function adjustStock(productId, delta, depotId) {
 function resetProductForm() {
   state.showAddProduct = false; state.editingProductId = null;
   state.npName = ''; state.npBarcode = ''; state.npPrice = ''; state.npCost = ''; state.npStock = ''; state.npMinStock = '';
-  state.npUnitsPerPack = ''; state.npPricePerPack = ''; state.npUnitsPerCarton = ''; state.npPricePerCarton = ''; state.npImage = ''; state.npLocation = '';
+  state.npUnitsPerPack = ''; state.npPricePerPack = ''; state.npUnitsPerCarton = ''; state.npPricePerCarton = ''; state.npImage = ''; state.npLocation = ''; state.npWeight = '';
 }
 function openAddProductForm() {
   resetProductForm();
@@ -787,7 +787,7 @@ function openEditProductForm(id) {
   state.npPrice = p.price; state.npCost = p.cost; state.npMinStock = p.minStock;
   state.npUnitsPerPack = p.unitsPerPack || ''; state.npPricePerPack = p.pricePerPack || '';
   state.npUnitsPerCarton = p.unitsPerCarton || ''; state.npPricePerCarton = p.pricePerCarton || '';
-  state.npImage = p.image || ''; state.npLocation = p.location || '';
+  state.npImage = p.image || ''; state.npLocation = p.location || ''; state.npWeight = p.weight || '';
   state.showAddProduct = true;
 }
 function saveProduct() {
@@ -801,7 +801,7 @@ async function addProduct() {
       price: Number(state.npPrice) || 0, cost: Number(state.npCost) || 0, stock: Number(state.npStock) || 0, minStock: Number(state.npMinStock) || 10,
       unitsPerPack: Number(state.npUnitsPerPack) || 0, pricePerPack: Number(state.npPricePerPack) || 0,
       unitsPerCarton: Number(state.npUnitsPerCarton) || 0, pricePerCarton: Number(state.npPricePerCarton) || 0,
-      image: state.npImage, location: state.npLocation.trim(),
+      image: state.npImage, location: state.npLocation.trim(), weight: Number(state.npWeight) || 0,
     });
     state.products.push(product);
     resetProductForm();
@@ -817,7 +817,7 @@ async function updateProduct() {
       price: Number(state.npPrice) || 0, cost: Number(state.npCost) || 0, minStock: Number(state.npMinStock) || 10,
       unitsPerPack: Number(state.npUnitsPerPack) || 0, pricePerPack: Number(state.npPricePerPack) || 0,
       unitsPerCarton: Number(state.npUnitsPerCarton) || 0, pricePerCarton: Number(state.npPricePerCarton) || 0,
-      image: state.npImage, location: state.npLocation.trim(),
+      image: state.npImage, location: state.npLocation.trim(), weight: Number(state.npWeight) || 0,
     });
     const idx = state.products.findIndex((p) => p.id === updated.id);
     if (idx >= 0) state.products[idx] = updated;
@@ -861,7 +861,7 @@ function removeProductImage() { state.npImage = ''; rerender(); }
 // accented characters (é, à, ô — this whole app is French) to render
 // correctly instead of mojibake.
 const CSV_DELIMITER = ';';
-const PRODUCT_CSV_COLUMNS = ['ID', 'Nom', 'Catégorie', 'Fournisseur', 'Prix vente', 'Prix achat', 'Stock minimum', 'Code-barres', 'Emplacement', 'Unités/Paquet', 'Prix Paquet', 'Unités/Carton', 'Prix Carton'];
+const PRODUCT_CSV_COLUMNS = ['ID', 'Nom', 'Catégorie', 'Fournisseur', 'Prix vente', 'Prix achat', 'Stock minimum', 'Code-barres', 'Emplacement', 'Poids (kg)', 'Unités/Paquet', 'Prix Paquet', 'Unités/Carton', 'Prix Carton'];
 function csvEscape(cell) {
   const s = cell === undefined || cell === null ? '' : String(cell);
   if (s.includes(CSV_DELIMITER) || s.includes(',') || s.includes('"') || s.includes('\n') || s.includes('\r')) {
@@ -878,7 +878,7 @@ function buildProductsCsv() {
   state.products.forEach((p) => {
     const row = [
       p.id, p.name, catById[p.categoryId] || '', supById[p.supplierId] || '',
-      p.price, p.cost, p.minStock, p.barcode, p.location || '',
+      p.price, p.cost, p.minStock, p.barcode, p.location || '', p.weight || '',
       p.unitsPerPack || '', p.pricePerPack || '', p.unitsPerCarton || '', p.pricePerCarton || '',
     ];
     state.depots.forEach((d) => row.push(stockAt(p, d.id)));
@@ -972,6 +972,7 @@ function rowsToImportPayload(parsedRows, depots) {
       id, name: r['Nom'], categoryName: r['Catégorie'], supplierName: r['Fournisseur'],
       price: parseImportNumber(r['Prix vente'], delimiter), cost: parseImportNumber(r['Prix achat'], delimiter),
       minStock: parseImportNumber(r['Stock minimum'], delimiter), barcode: r['Code-barres'], location: r['Emplacement'],
+      weight: parseImportNumber(r['Poids (kg)'], delimiter),
       unitsPerPack: parseImportNumber(r['Unités/Paquet'], delimiter), pricePerPack: parseImportNumber(r['Prix Paquet'], delimiter),
       unitsPerCarton: parseImportNumber(r['Unités/Carton'], delimiter), pricePerCarton: parseImportNumber(r['Prix Carton'], delimiter),
       stockByDepotName,
@@ -1820,6 +1821,7 @@ function renderStocks() {
     ${isEditingProduct ? '' : `<input id="field-npStock" class="field" type="number" placeholder="Stock initial" value="${esc(state.npStock)}" data-bind="npStock" />`}
     <input id="field-npMinStock" class="field" type="number" placeholder="Seuil minimum" value="${esc(state.npMinStock)}" data-bind="npMinStock" />
     <input id="field-npLocation" class="field" type="text" placeholder="Emplacement en magasin (ex: Allée 3, Étagère B)" value="${esc(state.npLocation)}" data-bind="npLocation" />
+    <input id="field-npWeight" class="field" type="number" step="0.01" placeholder="Poids (kg, optionnel)" value="${esc(state.npWeight)}" data-bind="npWeight" />
     <input id="field-npUnitsPerPack" class="field" type="number" placeholder="Unités par paquet (optionnel)" value="${esc(state.npUnitsPerPack)}" data-bind="npUnitsPerPack" />
     <input id="field-npPricePerPack" class="field" type="number" placeholder="Prix du paquet (FCFA)" value="${esc(state.npPricePerPack)}" data-bind="npPricePerPack" />
     <input id="field-npUnitsPerCarton" class="field" type="number" placeholder="Unités par carton (optionnel)" value="${esc(state.npUnitsPerCarton)}" data-bind="npUnitsPerCarton" />

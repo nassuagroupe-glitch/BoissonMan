@@ -116,7 +116,7 @@ function buildSeed() {
   ];
   const products = productsRaw.map((p, i) => {
     const { stock, ...rest } = p;
-    return Object.assign({ unitsPerPack: 0, pricePerPack: 0, unitsPerCarton: 0, pricePerCarton: 0, location: '' }, rest, {
+    return Object.assign({ unitsPerPack: 0, pricePerPack: 0, unitsPerCarton: 0, pricePerCarton: 0, location: '', weight: 0 }, rest, {
       stockByDepot: splitStock(stock, depotIds, [0.6]),
       barcode: '20000000000' + String(i + 1).padStart(2, '0'),
     });
@@ -247,6 +247,7 @@ function migrateTenantData(data) {
       changed = true;
     }
     if (p.location === undefined) { p.location = ''; changed = true; }
+    if (p.weight === undefined) { p.weight = 0; changed = true; }
   });
   if (!data.settings) { data.settings = defaultSettings(); changed = true; }
   else if (data.settings.ncc === undefined) {
@@ -1136,6 +1137,7 @@ async function handleApi(req, res, pathname) {
       pricePerCarton: Number(body.pricePerCarton) || 0,
       image: typeof body.image === 'string' ? body.image : '',
       location: (body.location || '').trim(),
+      weight: Number(body.weight) || 0,
     };
     db.products.push(product);
     saveTenant(session.tenantId);
@@ -1169,6 +1171,7 @@ async function handleApi(req, res, pathname) {
     if (body.unitsPerCarton !== undefined) product.unitsPerCarton = Number(body.unitsPerCarton) || 0;
     if (body.pricePerCarton !== undefined) product.pricePerCarton = Number(body.pricePerCarton) || 0;
     if (body.location !== undefined) product.location = String(body.location).trim();
+    if (body.weight !== undefined) product.weight = Number(body.weight) || 0;
     if (body.image !== undefined) {
       // Unlike barcode above, an empty string is a valid, intentional value
       // here (the form's "Supprimer l'image" link) — same write-and-clear
@@ -1255,6 +1258,7 @@ async function handleApi(req, res, pathname) {
         const pricePerCarton = parseNum(row.pricePerCarton, 'Prix Carton');
 
         const location = row.location !== undefined ? String(row.location).trim() : undefined;
+        const weight = parseNum(row.weight, 'Poids');
         const barcode = row.barcode !== undefined ? String(row.barcode).trim() : undefined;
         if (barcode) {
           const clash = db.products.find((p) => p.barcode === barcode && (!product || p.id !== product.id));
@@ -1300,6 +1304,7 @@ async function handleApi(req, res, pathname) {
           if (unitsPerCarton !== undefined) product.unitsPerCarton = unitsPerCarton;
           if (pricePerCarton !== undefined) product.pricePerCarton = pricePerCarton;
           if (location !== undefined) product.location = location;
+          if (weight !== undefined) product.weight = weight;
           Object.keys(row.stockByDepotName || {}).forEach((depotName) => {
             const val = row.stockByDepotName[depotName];
             if (val === undefined || val === null || val === '') return; // blank = untouched
@@ -1331,7 +1336,7 @@ async function handleApi(req, res, pathname) {
             barcode: barcode || uid('bc').slice(0, 13),
             unitsPerPack: unitsPerPack || 0, pricePerPack: pricePerPack || 0,
             unitsPerCarton: unitsPerCarton || 0, pricePerCarton: pricePerCarton || 0,
-            location: location || '',
+            location: location || '', weight: weight || 0,
           });
           created++;
         }
