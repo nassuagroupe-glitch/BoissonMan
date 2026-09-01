@@ -33,6 +33,10 @@ Name: "desktopicon"; Description: "Créer un raccourci sur le Bureau"; GroupDesc
 [Files]
 Source: "{#DistDir}\node\node.exe"; DestDir: "{app}\node"; Flags: ignoreversion
 Source: "{#DistDir}\server.js"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#DistDir}\storage.js"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#DistDir}\storage-file.js"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#DistDir}\sessions.js"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#DistDir}\sessions-memory.js"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#DistDir}\public\*"; DestDir: "{app}\public"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#DistDir}\BoissonMan.vbs"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#DistDir}\deploy\icon.ico"; DestDir: "{app}\deploy"; Flags: ignoreversion
