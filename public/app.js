@@ -102,7 +102,7 @@ const state = {
   showUnitPicker: false, unitPickerProductId: null,
   scanInput: '', showScanner: false, scanError: null, scanMode: 'sell', scanDevices: [], scanDeviceId: '',
   stockSearch: '', stockCatFilter: 'all', showAddProduct: false,
-  npName: '', npBarcode: '', npCategoryId: '', npSupplierId: '', npDepotId: '', npPrice: '', npCost: '', npStock: '', npMinStock: '',
+  npName: '', npBarcode: '', npExtraBarcodes: '', npCategoryId: '', npSupplierId: '', npDepotId: '', npPrice: '', npCost: '', npStock: '', npMinStock: '',
   npUnitsPerPack: '', npPricePerPack: '', npUnitsPerCarton: '', npPricePerCarton: '', npImage: '', npLocation: '', npWeight: '', editingProductId: null,
   confirmDeleteProductId: null,
   showImportPreview: false, impFileName: '', impRows: [], impNewCount: 0, impUpdateCount: 0, impParseErrors: [], impResult: null, impBusy: false,
@@ -667,7 +667,8 @@ function playBeep() {
   } catch (e) {}
 }
 function lookupAndAddByBarcode(code) {
-  const product = state.products.find((p) => p.barcode === code.trim());
+  const trimmed = code.trim();
+  const product = state.products.find((p) => p.barcode === trimmed || (p.extraBarcodes || []).includes(trimmed));
   if (!product) { state.scanError = 'Code inconnu : ' + code; rerender(); return; }
   if (stockAt(product, state.currentDepotId) <= 0) { state.scanError = product.name + ' — rupture de stock au ' + depotName(state.currentDepotId); rerender(); return; }
   addToCart(product.id);
@@ -768,8 +769,14 @@ function adjustStock(productId, delta, depotId) {
 }
 function resetProductForm() {
   state.showAddProduct = false; state.editingProductId = null;
-  state.npName = ''; state.npBarcode = ''; state.npPrice = ''; state.npCost = ''; state.npStock = ''; state.npMinStock = '';
+  state.npName = ''; state.npBarcode = ''; state.npExtraBarcodes = ''; state.npPrice = ''; state.npCost = ''; state.npStock = ''; state.npMinStock = '';
   state.npUnitsPerPack = ''; state.npPricePerPack = ''; state.npUnitsPerCarton = ''; state.npPricePerCarton = ''; state.npImage = ''; state.npLocation = ''; state.npWeight = '';
+}
+// The additional-references field is one comma-separated text input rather
+// than a dynamic multi-row list — this app has no other repeatable-field UI
+// pattern, and a shop rarely needs more than 2-3 alternate codes per product.
+function parseExtraBarcodesInput(str) {
+  return String(str || '').split(',').map((b) => b.trim()).filter(Boolean);
 }
 function openAddProductForm() {
   resetProductForm();
@@ -783,7 +790,7 @@ function openEditProductForm(id) {
   if (!p) return;
   resetProductForm();
   state.editingProductId = id;
-  state.npName = p.name; state.npBarcode = p.barcode || ''; state.npCategoryId = p.categoryId; state.npSupplierId = p.supplierId;
+  state.npName = p.name; state.npBarcode = p.barcode || ''; state.npExtraBarcodes = (p.extraBarcodes || []).join(', '); state.npCategoryId = p.categoryId; state.npSupplierId = p.supplierId;
   state.npPrice = p.price; state.npCost = p.cost; state.npMinStock = p.minStock;
   state.npUnitsPerPack = p.unitsPerPack || ''; state.npPricePerPack = p.pricePerPack || '';
   state.npUnitsPerCarton = p.unitsPerCarton || ''; state.npPricePerCarton = p.pricePerCarton || '';
@@ -797,7 +804,7 @@ async function addProduct() {
   if (!state.npName.trim()) return;
   try {
     const product = await api('POST', '/api/products', {
-      name: state.npName.trim(), barcode: state.npBarcode.trim(), categoryId: state.npCategoryId, supplierId: state.npSupplierId, depotId: state.npDepotId,
+      name: state.npName.trim(), barcode: state.npBarcode.trim(), extraBarcodes: parseExtraBarcodesInput(state.npExtraBarcodes), categoryId: state.npCategoryId, supplierId: state.npSupplierId, depotId: state.npDepotId,
       price: Number(state.npPrice) || 0, cost: Number(state.npCost) || 0, stock: Number(state.npStock) || 0, minStock: Number(state.npMinStock) || 10,
       unitsPerPack: Number(state.npUnitsPerPack) || 0, pricePerPack: Number(state.npPricePerPack) || 0,
       unitsPerCarton: Number(state.npUnitsPerCarton) || 0, pricePerCarton: Number(state.npPricePerCarton) || 0,
@@ -813,7 +820,7 @@ async function updateProduct() {
   if (!state.npName.trim()) return;
   try {
     const updated = await api('PATCH', `/api/products/${state.editingProductId}`, {
-      name: state.npName.trim(), barcode: state.npBarcode.trim(), categoryId: state.npCategoryId, supplierId: state.npSupplierId,
+      name: state.npName.trim(), barcode: state.npBarcode.trim(), extraBarcodes: parseExtraBarcodesInput(state.npExtraBarcodes), categoryId: state.npCategoryId, supplierId: state.npSupplierId,
       price: Number(state.npPrice) || 0, cost: Number(state.npCost) || 0, minStock: Number(state.npMinStock) || 10,
       unitsPerPack: Number(state.npUnitsPerPack) || 0, pricePerPack: Number(state.npPricePerPack) || 0,
       unitsPerCarton: Number(state.npUnitsPerCarton) || 0, pricePerCarton: Number(state.npPricePerCarton) || 0,
@@ -861,7 +868,7 @@ function removeProductImage() { state.npImage = ''; rerender(); }
 // accented characters (é, à, ô — this whole app is French) to render
 // correctly instead of mojibake.
 const CSV_DELIMITER = ';';
-const PRODUCT_CSV_COLUMNS = ['ID', 'Nom', 'Catégorie', 'Fournisseur', 'Prix vente', 'Prix achat', 'Stock minimum', 'Code-barres', 'Emplacement', 'Poids (kg)', 'Unités/Paquet', 'Prix Paquet', 'Unités/Carton', 'Prix Carton'];
+const PRODUCT_CSV_COLUMNS = ['ID', 'Nom', 'Catégorie', 'Fournisseur', 'Prix vente', 'Prix achat', 'Stock minimum', 'Code-barres', 'Codes-barres additionnels', 'Emplacement', 'Poids (kg)', 'Unités/Paquet', 'Prix Paquet', 'Unités/Carton', 'Prix Carton'];
 function csvEscape(cell) {
   const s = cell === undefined || cell === null ? '' : String(cell);
   if (s.includes(CSV_DELIMITER) || s.includes(',') || s.includes('"') || s.includes('\n') || s.includes('\r')) {
@@ -878,7 +885,7 @@ function buildProductsCsv() {
   state.products.forEach((p) => {
     const row = [
       p.id, p.name, catById[p.categoryId] || '', supById[p.supplierId] || '',
-      p.price, p.cost, p.minStock, p.barcode, p.location || '', p.weight || '',
+      p.price, p.cost, p.minStock, p.barcode, (p.extraBarcodes || []).join(', '), p.location || '', p.weight || '',
       p.unitsPerPack || '', p.pricePerPack || '', p.unitsPerCarton || '', p.pricePerCarton || '',
     ];
     state.depots.forEach((d) => row.push(stockAt(p, d.id)));
@@ -971,7 +978,11 @@ function rowsToImportPayload(parsedRows, depots) {
     payload.push({
       id, name: r['Nom'], categoryName: r['Catégorie'], supplierName: r['Fournisseur'],
       price: parseImportNumber(r['Prix vente'], delimiter), cost: parseImportNumber(r['Prix achat'], delimiter),
-      minStock: parseImportNumber(r['Stock minimum'], delimiter), barcode: r['Code-barres'], location: r['Emplacement'],
+      minStock: parseImportNumber(r['Stock minimum'], delimiter), barcode: r['Code-barres'],
+      // Same "blank = untouched" rule as every other optional column — a
+      // blank cell never clears existing extra barcodes on an update row.
+      extraBarcodes: r['Codes-barres additionnels'] ? parseExtraBarcodesInput(r['Codes-barres additionnels']) : undefined,
+      location: r['Emplacement'],
       weight: parseImportNumber(r['Poids (kg)'], delimiter),
       unitsPerPack: parseImportNumber(r['Unités/Paquet'], delimiter), pricePerPack: parseImportNumber(r['Prix Paquet'], delimiter),
       unitsPerCarton: parseImportNumber(r['Unités/Carton'], delimiter), pricePerCarton: parseImportNumber(r['Prix Carton'], delimiter),
@@ -1808,6 +1819,8 @@ function renderStocks() {
       <div class="camera-btn" data-action="openScanner" data-mode="register" title="Scanner avec une caméra (webcam ou téléphone)">${ICON_CAMERA}</div>
     </div>
     <div class="pos-hint" style="grid-column:1/-1;margin:0">Astuce : cliquez dans le champ code-barres puis scannez le produit avec un lecteur USB — le code s'y saisit tout seul. Ou utilisez le bouton caméra pour scanner avec une webcam ou un téléphone connecté au PC. Laissez vide pour générer un code interne automatiquement.</div>
+    <input id="field-npExtraBarcodes" class="field" style="grid-column:1/-1" type="text" placeholder="Codes-barres additionnels (optionnel, séparés par des virgules)" value="${esc(state.npExtraBarcodes)}" data-bind="npExtraBarcodes" />
+    <div class="pos-hint" style="grid-column:1/-1;margin:0">Utile si le même produit existe avec plusieurs codes-barres imprimés (lots ou fournisseurs différents) — scanner n'importe lequel le retrouvera.</div>
     <div style="grid-column:1/-1;display:flex;gap:12px;align-items:center;flex-wrap:wrap">
       ${state.npImage ? `<div class="product-image-preview"><img src="${state.npImage}" alt="" /></div>` : ''}
       <input id="field-npImageFile" type="file" accept="image/*" data-bind="npImageFile" />

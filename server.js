@@ -116,7 +116,7 @@ function buildSeed() {
   ];
   const products = productsRaw.map((p, i) => {
     const { stock, ...rest } = p;
-    return Object.assign({ unitsPerPack: 0, pricePerPack: 0, unitsPerCarton: 0, pricePerCarton: 0, location: '', weight: 0 }, rest, {
+    return Object.assign({ unitsPerPack: 0, pricePerPack: 0, unitsPerCarton: 0, pricePerCarton: 0, location: '', weight: 0, extraBarcodes: [] }, rest, {
       stockByDepot: splitStock(stock, depotIds, [0.6]),
       barcode: '20000000000' + String(i + 1).padStart(2, '0'),
     });
@@ -248,6 +248,7 @@ function migrateTenantData(data) {
     }
     if (p.location === undefined) { p.location = ''; changed = true; }
     if (p.weight === undefined) { p.weight = 0; changed = true; }
+    if (p.extraBarcodes === undefined) { p.extraBarcodes = []; changed = true; }
   });
   if (!data.settings) { data.settings = defaultSettings(); changed = true; }
   else if (data.settings.ncc === undefined) {
@@ -576,6 +577,16 @@ function readJSONBody(req, maxBytes = 1e6) {
 }
 function stockAt(product, depotId) {
   return (product.stockByDepot && product.stockByDepot[depotId]) || 0;
+}
+// A product's scannable codes are its primary `barcode` plus any
+// `extraBarcodes` (alternate codes printed on different batches/suppliers
+// for the same physical item) — every uniqueness check and scan lookup
+// must consider both, not just the primary field.
+function normalizeBarcodeList(list) {
+  return Array.from(new Set((Array.isArray(list) ? list : []).map((b) => String(b || '').trim()).filter(Boolean)));
+}
+function findBarcodeOwner(db, code, excludeId) {
+  return db.products.find((p) => p.id !== excludeId && (p.barcode === code || (p.extraBarcodes || []).includes(code)));
 }
 // Resolves the unit price and base-unit multiplier for a cart line's sale
 // unit ('pack'/'carton'), falling back to the per-unit ('detail') price if
@@ -1112,8 +1123,14 @@ async function handleApi(req, res, pathname) {
     const name = (body.name || '').trim();
     if (!name) return sendJSON(res, 400, { error: 'Nom requis' });
     const scannedBarcode = (body.barcode || '').trim();
-    if (scannedBarcode && db.products.some((p) => p.barcode === scannedBarcode)) {
+    if (scannedBarcode && findBarcodeOwner(db, scannedBarcode, null)) {
       return sendJSON(res, 400, { error: 'Ce code-barres est déjà utilisé par un autre produit' });
+    }
+    const extraBarcodes = normalizeBarcodeList(body.extraBarcodes).filter((b) => b !== scannedBarcode);
+    for (const b of extraBarcodes) {
+      if (findBarcodeOwner(db, b, null)) {
+        return sendJSON(res, 400, { error: `Le code-barres additionnel "${b}" est déjà utilisé par un autre produit` });
+      }
     }
     if (typeof body.image === 'string' && body.image.length > MAX_PRODUCT_IMAGE_LENGTH) {
       return sendJSON(res, 400, { error: 'Image trop volumineuse (taille maximale ~500 Ko)' });
@@ -1131,6 +1148,7 @@ async function handleApi(req, res, pathname) {
       minStock: Number(body.minStock) || 10,
       sold: 0,
       barcode: scannedBarcode || uid('bc').slice(0, 13),
+      extraBarcodes,
       unitsPerPack: Number(body.unitsPerPack) || 0,
       pricePerPack: Number(body.pricePerPack) || 0,
       unitsPerCarton: Number(body.unitsPerCarton) || 0,
@@ -1156,10 +1174,19 @@ async function handleApi(req, res, pathname) {
     }
     if (body.barcode !== undefined) {
       const barcode = body.barcode.trim();
-      if (barcode && db.products.some((p) => p.barcode === barcode && p.id !== product.id)) {
+      if (barcode && findBarcodeOwner(db, barcode, product.id)) {
         return sendJSON(res, 400, { error: 'Ce code-barres est déjà utilisé par un autre produit' });
       }
       if (barcode) product.barcode = barcode;
+    }
+    if (body.extraBarcodes !== undefined) {
+      const extraBarcodes = normalizeBarcodeList(body.extraBarcodes).filter((b) => b !== product.barcode);
+      for (const b of extraBarcodes) {
+        if (findBarcodeOwner(db, b, product.id)) {
+          return sendJSON(res, 400, { error: `Le code-barres additionnel "${b}" est déjà utilisé par un autre produit` });
+        }
+      }
+      product.extraBarcodes = extraBarcodes;
     }
     if (body.categoryId !== undefined) product.categoryId = body.categoryId;
     if (body.supplierId !== undefined) product.supplierId = body.supplierId;
@@ -1261,8 +1288,17 @@ async function handleApi(req, res, pathname) {
         const weight = parseNum(row.weight, 'Poids');
         const barcode = row.barcode !== undefined ? String(row.barcode).trim() : undefined;
         if (barcode) {
-          const clash = db.products.find((p) => p.barcode === barcode && (!product || p.id !== product.id));
+          const clash = findBarcodeOwner(db, barcode, product ? product.id : null);
           if (clash) throw new Error('Ce code-barres est déjà utilisé par un autre produit');
+        }
+        const extraBarcodes = row.extraBarcodes !== undefined
+          ? normalizeBarcodeList(row.extraBarcodes).filter((b) => b !== (barcode || (product && product.barcode)))
+          : undefined;
+        if (extraBarcodes) {
+          for (const b of extraBarcodes) {
+            const clash = findBarcodeOwner(db, b, product ? product.id : null);
+            if (clash) throw new Error(`Le code-barres additionnel "${b}" est déjà utilisé par un autre produit`);
+          }
         }
 
         // Category/supplier are resolved (and auto-created) LAST, only once
@@ -1294,6 +1330,7 @@ async function handleApi(req, res, pathname) {
           // only" re-import can't silently wipe stock or packaging.
           if (name) product.name = name;
           if (barcode) product.barcode = barcode;
+          if (extraBarcodes !== undefined) product.extraBarcodes = extraBarcodes;
           if (categoryId !== undefined) product.categoryId = categoryId;
           if (supplierId !== undefined) product.supplierId = supplierId;
           if (price !== undefined) product.price = price;
@@ -1334,6 +1371,7 @@ async function handleApi(req, res, pathname) {
             minStock: minStock === undefined ? 10 : minStock,
             sold: 0,
             barcode: barcode || uid('bc').slice(0, 13),
+            extraBarcodes: extraBarcodes || [],
             unitsPerPack: unitsPerPack || 0, pricePerPack: pricePerPack || 0,
             unitsPerCarton: unitsPerCarton || 0, pricePerCarton: pricePerCarton || 0,
             location: location || '', weight: weight || 0,
