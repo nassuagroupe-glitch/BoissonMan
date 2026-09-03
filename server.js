@@ -21,6 +21,11 @@ const PUBLIC_DIR = path.join(__dirname, 'public');
 // otherwise data would live on the container's ephemeral filesystem and
 // be wiped on every redeploy/restart.
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
+// Pre-multi-tenant layout: a single flat db.json directly under DATA_DIR.
+// Kept only as a migration source (see migrateSingleTenantLayout below).
+const LEGACY_DB_PATH = path.join(DATA_DIR, 'db.json');
+const TENANTS_DIR = path.join(DATA_DIR, 'tenants');
+const TENANTS_META_PATH = path.join(TENANTS_DIR, 'tenants.json');
 // Shared secret for the owner-only shop-management endpoints
 // (POST/GET /api/admin/tenants). Not a per-user login — there is exactly
 // one operator (the platform owner) who creates shops; per-shop Gérants
@@ -254,17 +259,70 @@ function migrateTenantData(data) {
 }
 
 // ---------- Persistence (multi-tenant) ----------
-// The actual read/write logic lives in storage.js, which picks between two
-// swappable backends (file-based, used by the standalone Windows installer
-// and local dev; Firestore-based, used by the hosted Firebase deployment —
-// see storage.js/storage-file.js/storage-firestore.js). tenants/tenantsMeta
-// stay owned here and are shared by reference — every route below still
-// reads them directly, unchanged.
 const tenants = new Map(); // tenantId -> db object ({depots, categories, ...})
-const tenantsMeta = []; // [{id, name, createdAt}], mirrors tenants.keys()
-const { saveTenant, saveTenantsMeta, loadAllTenants } = require('./storage')({
-  tenants, tenantsMeta, buildSeed, migrateTenantData, ADMIN_SECRET, DATA_DIR,
-});
+let tenantsMeta = []; // [{id, name, createdAt}], mirrors tenants.keys()
+
+function tenantDbPath(id) {
+  return path.join(TENANTS_DIR, id, 'db.json');
+}
+function saveTenant(id) {
+  const p = tenantDbPath(id);
+  fs.mkdirSync(path.dirname(p), { recursive: true });
+  fs.writeFileSync(p, JSON.stringify(tenants.get(id), null, 2));
+}
+function saveTenantsMeta() {
+  fs.mkdirSync(TENANTS_DIR, { recursive: true });
+  fs.writeFileSync(TENANTS_META_PATH, JSON.stringify(tenantsMeta, null, 2));
+}
+// One-time upgrade from the pre-multi-tenant layout (a single flat
+// DATA_DIR/db.json) into tenants/default/db.json. Only runs when there is
+// no tenants.json yet at all — never overwrites an existing multi-tenant
+// setup, and the original flat file is left in place afterward (untouched,
+// not deleted) as a safety net rather than removed.
+function migrateSingleTenantLayout() {
+  if (fs.existsSync(TENANTS_META_PATH)) return false;
+  if (!fs.existsSync(LEGACY_DB_PATH)) return false;
+  const data = JSON.parse(fs.readFileSync(LEGACY_DB_PATH, 'utf8'));
+  migrateTenantData(data);
+  const id = 'default';
+  fs.mkdirSync(path.dirname(tenantDbPath(id)), { recursive: true });
+  fs.writeFileSync(tenantDbPath(id), JSON.stringify(data, null, 2));
+  tenantsMeta = [{ id, name: 'Boutique principale', createdAt: new Date().toISOString() }];
+  saveTenantsMeta();
+  return true;
+}
+function loadAllTenants() {
+  fs.mkdirSync(TENANTS_DIR, { recursive: true });
+  migrateSingleTenantLayout();
+  if (fs.existsSync(TENANTS_META_PATH)) {
+    tenantsMeta = JSON.parse(fs.readFileSync(TENANTS_META_PATH, 'utf8'));
+  } else if (ADMIN_SECRET) {
+    // Hosted multi-tenant platform (e.g. Railway): a genuinely fresh install
+    // stays empty on purpose — only the platform owner mints new shops, via
+    // the ADMIN_SECRET-gated POST /api/admin/tenants.
+    tenantsMeta = [];
+  } else {
+    // Standalone install (e.g. the Windows installer put on a shop's own
+    // PC): there is no platform owner and no ADMIN_SECRET to call the admin
+    // route with, so a shop with zero tenants would be permanently stuck at
+    // the login screen with nothing to log into. Auto-create one demo-seeded
+    // "Boutique principale" tenant, mirroring the old pre-multi-tenant
+    // fresh-install behavior.
+    const id = 'default';
+    tenants.set(id, buildSeed());
+    saveTenant(id);
+    tenantsMeta = [{ id, name: 'Boutique principale', createdAt: new Date().toISOString() }];
+    saveTenantsMeta();
+  }
+  tenants.clear();
+  tenantsMeta.forEach((t) => {
+    const p = tenantDbPath(t.id);
+    if (!fs.existsSync(p)) return; // meta/data got out of sync — skip rather than crash
+    const data = JSON.parse(fs.readFileSync(p, 'utf8'));
+    if (migrateTenantData(data)) fs.writeFileSync(p, JSON.stringify(data, null, 2));
+    tenants.set(t.id, data);
+  });
+}
 // ---------- FNE (Facture Normalisée Électronique — DGI Côte d'Ivoire) ----------
 // Real API integration, per "PROCEDURE D'INTERFACAGE DES ENTREPRISES PAR API"
 // (DGI, mai 2025) supplied by the user. Scope: certification de facture de
@@ -453,11 +511,7 @@ async function sendSmsViaOrange(cfg, toPhone, message) {
   }
 }
 
-// Kicked off here, awaited just before server.listen() below — loadAllTenants
-// is async (the Firestore backend does real I/O; the file backend just wraps
-// its synchronous fs calls for interface parity), so the server must not
-// start accepting requests until it resolves.
-const tenantsReady = loadAllTenants();
+loadAllTenants();
 
 // ---------- Helpers ----------
 function uid(prefix) {
@@ -504,21 +558,6 @@ function sendJSON(res, status, data) {
 // left growing) until the real `end` event, and only reject then, so the
 // request is always fully consumed before sendJSON's response goes out.
 function readJSONBody(req, maxBytes = 1e6) {
-  // Cloud Functions (2nd gen) fully drains req before invoking the handler
-  // and exposes the already-buffered body as req.rawBody — by then req's own
-  // stream has nothing left to emit, so the manual req.on('data') path below
-  // would silently resolve {} on every single POST/PATCH request. Prefer
-  // rawBody whenever the platform provides it; the raw-stream path is only
-  // reached on plain http.IncomingMessage (local dev, the Windows
-  // installer), which never has a rawBody property.
-  if (req.rawBody !== undefined) {
-    return new Promise((resolve, reject) => {
-      const buf = req.rawBody;
-      if (buf.length > maxBytes) return reject(new Error('Fichier trop volumineux'));
-      if (!buf.length) return resolve({});
-      try { resolve(JSON.parse(buf.toString('utf8'))); } catch (e) { reject(e); }
-    });
-  }
   return new Promise((resolve, reject) => {
     let chunks = '';
     let overflowed = false;
@@ -749,12 +788,32 @@ function checkAdminSecret(req) {
 }
 
 // ---------- Sessions ----------
-// Same swappable-backend pattern as storage above: in-memory by default
-// (file/installer path, one process, sessions lost on restart is fine — see
-// app.js, authToken lives in a JS variable, never localStorage), Firestore
-// when FIRESTORE_PROJECT_ID is set (needed there so Cloud Functions can
-// scale to zero without logging everyone out on every cold start).
-const { createSession, getSession, deleteSession } = require('./sessions')();
+// In-memory only (no DB table): sessions are lost on server restart, which
+// just forces everyone to log in again — acceptable since the client never
+// persisted login across a page reload anyway (see app.js: authToken lives
+// in a JS variable, never localStorage).
+const sessions = new Map(); // token -> { tenantId, employeeId, role, createdAt }
+const SESSION_TTL_MS = 12 * 60 * 60 * 1000; // 12h
+function createSession(tenantId, employee) {
+  const token = crypto.randomBytes(32).toString('hex');
+  sessions.set(token, {
+    tenantId,
+    employeeId: employee.id,
+    role: employee.role === 'Gérant' ? 'manager' : 'cashier',
+    createdAt: Date.now(),
+  });
+  return token;
+}
+function getSession(req) {
+  const header = req.headers['authorization'] || '';
+  const match = header.match(/^Bearer (.+)$/);
+  if (!match) return null;
+  const token = match[1];
+  const session = sessions.get(token);
+  if (!session) return null;
+  if (Date.now() - session.createdAt > SESSION_TTL_MS) { sessions.delete(token); return null; }
+  return { token, tenantId: session.tenantId, employeeId: session.employeeId, role: session.role };
+}
 
 const CAT_PALETTE = ['#c1440e', '#b8862f', '#2f7f9e', '#d9812f', '#7d3b56', '#5a4a34', '#c99a2e', '#3b6e5c', '#4a6fa5', '#8a5a83'];
 
@@ -777,7 +836,7 @@ async function handleApi(req, res, pathname) {
     if (body.expectedRole && body.expectedRole !== role) {
       return sendJSON(res, 403, { error: `Ce compte est un compte ${employee.role}. Utilisez le bouton correspondant.` });
     }
-    const token = await createSession(tenantId, employee);
+    const token = createSession(tenantId, employee);
     return sendJSON(res, 200, { token, role, userId: employee.id, userName: employee.name, depotId: employee.depotId });
   }
 
@@ -807,8 +866,8 @@ async function handleApi(req, res, pathname) {
     };
     tenants.set(tenantId, newDb);
     tenantsMeta.push({ id: tenantId, name: shopName, createdAt: new Date().toISOString() });
-    await saveTenant(tenantId);
-    await saveTenantsMeta();
+    saveTenant(tenantId);
+    saveTenantsMeta();
     return sendJSON(res, 201, { tenantId, shopName });
   }
   if (pathname === '/api/admin/tenants' && method === 'GET') {
@@ -824,13 +883,13 @@ async function handleApi(req, res, pathname) {
   // (guaranteed once it's hosted publicly, not just on the shop's own PC)
   // could read the full database or mutate it via /api/state and friends
   // without ever logging in.
-  const session = await getSession(req);
+  const session = getSession(req);
   if (!session) return sendJSON(res, 401, { error: 'Session invalide ou expirée. Veuillez vous reconnecter.' });
   const db = tenants.get(session.tenantId);
-  if (!db) { await deleteSession(session.token); return sendJSON(res, 401, { error: 'Session invalide ou expirée. Veuillez vous reconnecter.' }); }
+  if (!db) { sessions.delete(session.token); return sendJSON(res, 401, { error: 'Session invalide ou expirée. Veuillez vous reconnecter.' }); }
   const currentUser = db.employees.find((e) => e.id === session.employeeId);
   if (!currentUser || !currentUser.active) {
-    await deleteSession(session.token);
+    sessions.delete(session.token);
     return sendJSON(res, 401, { error: 'Session invalide ou expirée. Veuillez vous reconnecter.' });
   }
   const isManager = session.role === 'manager';
@@ -872,7 +931,7 @@ async function handleApi(req, res, pathname) {
   }
 
   if (pathname === '/api/logout' && method === 'POST') {
-    await deleteSession(session.token);
+    sessions.delete(session.token);
     return sendJSON(res, 200, { ok: true });
   }
 
@@ -891,7 +950,7 @@ async function handleApi(req, res, pathname) {
     const newPassword = body.newPassword || '';
     if (newPassword.length < 4) return sendJSON(res, 400, { error: 'Le nouveau mot de passe doit contenir au moins 4 caractères' });
     Object.assign(employee, hashPassword(newPassword));
-    await saveTenant(session.tenantId);
+    saveTenant(session.tenantId);
     return sendJSON(res, 200, { ok: true });
   }
 
@@ -901,7 +960,7 @@ async function handleApi(req, res, pathname) {
     if (!name) return sendJSON(res, 400, { error: 'Nom requis' });
     const depot = { id: uid('d'), name, address: body.address || '' };
     db.depots.push(depot);
-    await saveTenant(session.tenantId);
+    saveTenant(session.tenantId);
     return sendJSON(res, 201, depot);
   }
 
@@ -912,7 +971,7 @@ async function handleApi(req, res, pathname) {
     const color = CAT_PALETTE[db.categories.length % CAT_PALETTE.length];
     const category = { id: uid('c'), name, color };
     db.categories.push(category);
-    await saveTenant(session.tenantId);
+    saveTenant(session.tenantId);
     return sendJSON(res, 201, category);
   }
 
@@ -922,7 +981,7 @@ async function handleApi(req, res, pathname) {
     if (!name) return sendJSON(res, 400, { error: 'Nom requis' });
     const supplier = { id: uid('s'), name, phone: body.phone || '', email: body.email || '' };
     db.suppliers.push(supplier);
-    await saveTenant(session.tenantId);
+    saveTenant(session.tenantId);
     return sendJSON(res, 201, supplier);
   }
 
@@ -932,7 +991,7 @@ async function handleApi(req, res, pathname) {
     if (!name) return sendJSON(res, 400, { error: 'Nom requis' });
     const client = { id: uid('cl'), name, phone: body.phone || '', email: (body.email || '').trim(), ncc: (body.ncc || '').trim(), points: 0, totalSpent: 0 };
     db.clients.push(client);
-    await saveTenant(session.tenantId);
+    saveTenant(session.tenantId);
     return sendJSON(res, 201, client);
   }
 
@@ -949,7 +1008,7 @@ async function handleApi(req, res, pathname) {
     if (body.phone !== undefined) client.phone = body.phone.trim();
     if (body.email !== undefined) client.email = body.email.trim();
     if (body.ncc !== undefined) client.ncc = body.ncc.trim();
-    await saveTenant(session.tenantId);
+    saveTenant(session.tenantId);
     return sendJSON(res, 200, client);
   }
 
@@ -971,7 +1030,7 @@ async function handleApi(req, res, pathname) {
       return sendJSON(res, 409, { error: `Impossible de supprimer ce client : il a un crédit en cours de ${Math.round(owed)} FCFA. Réglez le solde d'abord.` });
     }
     db.clients = db.clients.filter((c) => c.id !== client.id);
-    await saveTenant(session.tenantId);
+    saveTenant(session.tenantId);
     return sendJSON(res, 200, { ok: true });
   }
 
@@ -992,7 +1051,7 @@ async function handleApi(req, res, pathname) {
       depotId: body.depotId || null,
     }, hashPassword(password));
     db.employees.push(employee);
-    await saveTenant(session.tenantId);
+    saveTenant(session.tenantId);
     return sendJSON(res, 201, publicEmployee(employee));
   }
 
@@ -1004,7 +1063,7 @@ async function handleApi(req, res, pathname) {
       return sendJSON(res, 409, { error: 'Impossible de désactiver le dernier compte Gérant actif' });
     }
     employee.active = !employee.active;
-    await saveTenant(session.tenantId);
+    saveTenant(session.tenantId);
     return sendJSON(res, 200, publicEmployee(employee));
   }
 
@@ -1033,7 +1092,7 @@ async function handleApi(req, res, pathname) {
       employee.phone = phone;
     }
     if (body.depotId !== undefined) employee.depotId = body.depotId || null;
-    await saveTenant(session.tenantId);
+    saveTenant(session.tenantId);
     return sendJSON(res, 200, publicEmployee(employee));
   }
 
@@ -1044,7 +1103,7 @@ async function handleApi(req, res, pathname) {
       return sendJSON(res, 409, { error: 'Impossible de supprimer le dernier compte Gérant actif' });
     }
     db.employees = db.employees.filter((e) => e.id !== employee.id);
-    await saveTenant(session.tenantId);
+    saveTenant(session.tenantId);
     return sendJSON(res, 200, { ok: true });
   }
 
@@ -1081,7 +1140,7 @@ async function handleApi(req, res, pathname) {
       weight: Number(body.weight) || 0,
     };
     db.products.push(product);
-    await saveTenant(session.tenantId);
+    saveTenant(session.tenantId);
     return sendJSON(res, 201, product);
   }
 
@@ -1123,7 +1182,7 @@ async function handleApi(req, res, pathname) {
       }
       product.image = typeof body.image === 'string' ? body.image : '';
     }
-    await saveTenant(session.tenantId);
+    saveTenant(session.tenantId);
     return sendJSON(res, 200, product);
   }
 
@@ -1134,7 +1193,7 @@ async function handleApi(req, res, pathname) {
     // qty into sale.items at sale time (see POST /api/checkout), so past
     // sales never look the product up live and don't break on deletion.
     db.products = db.products.filter((p) => p.id !== product.id);
-    await saveTenant(session.tenantId);
+    saveTenant(session.tenantId);
     return sendJSON(res, 200, { ok: true });
   }
 
@@ -1293,7 +1352,7 @@ async function handleApi(req, res, pathname) {
       }
     });
 
-    if (created + updated > 0) await saveTenant(session.tenantId);
+    if (created + updated > 0) saveTenant(session.tenantId);
     return sendJSON(res, 200, {
       created, updated, errors,
       warnings: [...unmatchedDepotNames].map((n) => `Colonne "Stock ${n}" ignorée — aucun dépôt de ce nom`),
@@ -1309,7 +1368,7 @@ async function handleApi(req, res, pathname) {
     if (!depotId || !db.depots.some((d) => d.id === depotId)) return sendJSON(res, 400, { error: 'Dépôt invalide' });
     const delta = Number(body.delta) || 0;
     product.stockByDepot[depotId] = Math.max(0, stockAt(product, depotId) + delta);
-    await saveTenant(session.tenantId);
+    saveTenant(session.tenantId);
     return sendJSON(res, 200, product);
   }
 
@@ -1324,7 +1383,7 @@ async function handleApi(req, res, pathname) {
     if (stockAt(product, fromDepotId) < qty) return sendJSON(res, 409, { error: 'Stock insuffisant au dépôt source' });
     product.stockByDepot[fromDepotId] -= qty;
     product.stockByDepot[toDepotId] = stockAt(product, toDepotId) + qty;
-    await saveTenant(session.tenantId);
+    saveTenant(session.tenantId);
     return sendJSON(res, 200, product);
   }
 
@@ -1335,7 +1394,7 @@ async function handleApi(req, res, pathname) {
     const result = buildSaleFromCart(db, depot, body, { tolerateNegativeStock: false });
     if (result.error) return sendJSON(res, result.status || 400, { error: result.error });
     db.sales.unshift(result.sale);
-    await saveTenant(session.tenantId);
+    saveTenant(session.tenantId);
     return sendJSON(res, 201, { sale: result.sale });
   }
 
@@ -1365,7 +1424,7 @@ async function handleApi(req, res, pathname) {
       db.sales.unshift(result.sale);
       results.push({ offlineKey, sale: result.sale });
     }
-    await saveTenant(session.tenantId);
+    saveTenant(session.tenantId);
     return sendJSON(res, 200, { results });
   }
 
@@ -1383,7 +1442,7 @@ async function handleApi(req, res, pathname) {
     sale.creditPayments.push({ id: uid('pay'), date: new Date().toISOString(), amount });
     sale.creditPaid += amount;
     sale.creditRemaining -= amount;
-    await saveTenant(session.tenantId);
+    saveTenant(session.tenantId);
     return sendJSON(res, 200, sale);
   }
 
@@ -1406,7 +1465,7 @@ async function handleApi(req, res, pathname) {
       recordedBy: body.recordedBy || '',
     };
     db.expenses.unshift(expense);
-    await saveTenant(session.tenantId);
+    saveTenant(session.tenantId);
     return sendJSON(res, 201, expense);
   }
 
@@ -1492,7 +1551,7 @@ async function handleApi(req, res, pathname) {
       sendResults,
     };
     db.messageLog.unshift(entry);
-    await saveTenant(session.tenantId);
+    saveTenant(session.tenantId);
     return sendJSON(res, 201, entry);
   }
 
@@ -1517,7 +1576,7 @@ async function handleApi(req, res, pathname) {
         senderAddress: (body.senderAddress !== undefined ? body.senderAddress : current.sms.senderAddress || '').trim(),
       },
     };
-    await saveTenant(session.tenantId);
+    saveTenant(session.tenantId);
     return sendJSON(res, 200, publicMessagingConfig(db));
   }
 
@@ -1540,7 +1599,7 @@ async function handleApi(req, res, pathname) {
       bankDetails: (body.bankDetails || '').trim(),
       vatRate,
     };
-    await saveTenant(session.tenantId);
+    saveTenant(session.tenantId);
     return sendJSON(res, 200, db.settings);
   }
 
@@ -1560,7 +1619,7 @@ async function handleApi(req, res, pathname) {
       enabled: !!body.enabled,
       taxCode,
     };
-    await saveTenant(session.tenantId);
+    saveTenant(session.tenantId);
     return sendJSON(res, 200, publicFneConfig(db));
   }
 
@@ -1629,7 +1688,7 @@ async function handleApi(req, res, pathname) {
       balanceSticker: fneData.balance_sticker, warning: !!fneData.warning,
       certifiedAt: new Date().toISOString(),
     };
-    await saveTenant(session.tenantId);
+    saveTenant(session.tenantId);
     return sendJSON(res, 200, sale.fne);
   }
 
@@ -1678,11 +1737,6 @@ server.on('error', (err) => {
   process.exit(1);
 });
 
-tenantsReady.then(() => {
-  server.listen(PORT, HOST, () => {
-    console.log(`NassuaGroup disponible sur http://${HOST}:${PORT}`);
-  });
-}).catch((err) => {
-  console.error('Échec du chargement des données au démarrage :', err);
-  process.exit(1);
+server.listen(PORT, HOST, () => {
+  console.log(`NassuaGroup disponible sur http://${HOST}:${PORT}`);
 });

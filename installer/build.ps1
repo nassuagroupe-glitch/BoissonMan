@@ -46,14 +46,6 @@ New-Item -ItemType Directory -Force -Path "$distDir\node" | Out-Null
 New-Item -ItemType Directory -Force -Path "$distDir\deploy" | Out-Null
 Copy-Item $nodeCachePath "$distDir\node\node.exe"
 Copy-Item "$repoRoot\server.js" "$distDir\server.js"
-# storage-firestore.js/sessions-firestore.js/firebase-admin-client.js are
-# deliberately NOT bundled here — the installer never sets
-# FIRESTORE_PROJECT_ID, so storage.js/sessions.js never require() them; only
-# the file-backed adapters below are ever reachable on this install path.
-Copy-Item "$repoRoot\storage.js" "$distDir\storage.js"
-Copy-Item "$repoRoot\storage-file.js" "$distDir\storage-file.js"
-Copy-Item "$repoRoot\sessions.js" "$distDir\sessions.js"
-Copy-Item "$repoRoot\sessions-memory.js" "$distDir\sessions-memory.js"
 Copy-Item "$repoRoot\public" "$distDir\public" -Recurse
 Copy-Item "$installerDir\BoissonMan.vbs" "$distDir\BoissonMan.vbs"
 Copy-Item "$repoRoot\deploy\icon.ico" "$distDir\deploy\icon.ico"
@@ -74,7 +66,7 @@ if ($Test) {
   if (Test-Path $testDir) { Remove-Item -Recurse -Force $testDir }
   Write-Host "Test-installing to isolated scratch dir (no Desktop shortcut, per /TASKS override)..."
   Start-Process -FilePath $builtExe -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART","/TASKS=","/DIR=`"$testDir`"" -Wait
-  $expected = @("node\node.exe","server.js","storage.js","storage-file.js","sessions.js","sessions-memory.js","public\index.html","BoissonMan.vbs","deploy\icon.ico","unins000.exe")
+  $expected = @("node\node.exe","server.js","public\index.html","BoissonMan.vbs","deploy\icon.ico","unins000.exe")
   foreach ($f in $expected) {
     if (-not (Test-Path "$testDir\$f")) { throw "Test install missing expected file: $f" }
   }
