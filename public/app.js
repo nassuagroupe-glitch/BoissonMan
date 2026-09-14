@@ -25,6 +25,7 @@ const ICON_EXTERNAL = '<svg width="12" height="12" viewBox="0 0 24 24" fill="non
 const ICON_ETABLISSEMENT = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 21V9l8-5 8 5v12"></path><path d="M9 21v-6h6v6"></path><path d="M9 12h.01M15 12h.01M9 8h.01M15 8h.01"></path></svg>';
 const ICON_MENU = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3"><path d="M3 6h18M3 12h18M3 18h18"></path></svg>';
 const ICON_NOTIF = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"></path><path d="M13.7 21a2 2 0 0 1-3.4 0"></path></svg>';
+const ICON_BACK = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3"><path d="M19 12H5"></path><path d="M11 18l-6-6 6-6"></path></svg>';
 
 const FNE_URL = 'https://fne.dgi.gouv.ci';
 // The 4 fixed DGI tax codes accepted by the real FNE certification API —
@@ -101,7 +102,7 @@ const state = {
   cart: [], posCategory: 'all', posSearch: '', posClientId: '', paymentMethod: 'Espèces', posAdvance: '',
   showUnitPicker: false, unitPickerProductId: null,
   scanInput: '', showScanner: false, scanError: null, scanMode: 'sell', scanDevices: [], scanDeviceId: '',
-  stockSearch: '', stockCatFilter: 'all', showAddProduct: false,
+  stockSearch: '', stockCatFilter: 'all', stockLowOnly: false, showAddProduct: false,
   npName: '', npBarcode: '', npExtraBarcodes: '', npCategoryId: '', npSupplierId: '', npDepotId: '', npPrice: '', npCost: '', npStock: '', npMinStock: '',
   npUnitsPerPack: '', npPricePerPack: '', npUnitsPerCarton: '', npPricePerCarton: '', npImage: '', npLocation: '', npWeight: '', editingProductId: null,
   confirmDeleteProductId: null,
@@ -111,7 +112,7 @@ const state = {
   showAddClient: false, ncliName: '', ncliPhone: '', ncliEmail: '', ncliNcc: '', editingClientId: null, confirmDeleteClientId: null,
   showCreditReminderForm: false, msgClientId: '', msgChannel: 'sms', msgSubject: '', msgText: '',
   showAvailabilityForm: false, msgProductId: '', msgRecipientMode: 'all', msgSelectedClientIds: [],
-  showAddEmployee: false, neName: '', neRole: 'Caissier', neCustomRole: '', nePhone: '', neDepotId: '', nePassword: '',
+  showAddEmployee: false, neName: '', neRole: 'Caissier', neCustomRole: '', nePhone: '', neEmail: '', neDepotId: '', nePassword: '',
   editingEmployeeId: null, confirmDeleteEmployeeId: null,
   showAddDepot: false, ndName: '', ndAddress: '',
   showTransfer: false, trProductId: '', trFromDepotId: '', trToDepotId: '', trQty: '',
@@ -120,7 +121,7 @@ const state = {
   showAddExpense: false, exCategory: EXPENSE_CATEGORIES[0], exCustomCategory: '', exAmount: '', exDepotId: '', exNote: '',
   pwCurrent: '', pwNew: '', pwConfirm: '', pwError: null, pwSuccess: null,
   estCompanyName: '', estAddress: '', estPhone: '', estEmail: '', estTaxId: '', estLogo: '',
-  estNcc: '', estTaxRegime: '', estTaxCenter: '', estBankDetails: '', estVatRate: '0',
+  estNcc: '', estTaxRegime: '', estTaxCenter: '', estBankDetails: '', estVatRate: '0', estLowStockAlertsEnabled: false,
   fneEnabled: false, fneBaseUrl: '', fneTaxCode: '', fneHasApiKey: false, fneApiKeyInput: '', fneCertifying: false,
   msgCfgEmailEnabled: false, msgCfgGmailUser: '', msgCfgGmailAppPasswordInput: '', msgCfgHasAppPassword: false,
   msgCfgSmsEnabled: false, msgCfgClientId: '', msgCfgClientSecretInput: '', msgCfgHasClientSecret: false, msgCfgSenderAddress: '',
@@ -363,6 +364,7 @@ async function loadAppState() {
     state.estNcc = settings.ncc || ''; state.estTaxRegime = settings.taxRegime || '';
     state.estTaxCenter = settings.taxCenter || ''; state.estBankDetails = settings.bankDetails || '';
     state.estVatRate = String(settings.vatRate || 0);
+    state.estLowStockAlertsEnabled = !!settings.lowStockAlertsEnabled;
     const fneConfig = data.fneConfig || {};
     state.fneEnabled = !!fneConfig.enabled; state.fneBaseUrl = fneConfig.baseUrl || '';
     state.fneTaxCode = fneConfig.taxCode || ''; state.fneHasApiKey = !!fneConfig.hasApiKey;
@@ -1245,6 +1247,7 @@ async function saveSettings() {
       email: state.estEmail, taxId: state.estTaxId, logo: state.estLogo,
       ncc: state.estNcc, taxRegime: state.estTaxRegime, taxCenter: state.estTaxCenter,
       bankDetails: state.estBankDetails, vatRate: Number(state.estVatRate) || 0,
+      lowStockAlertsEnabled: state.estLowStockAlertsEnabled,
     });
     state.estCompanyName = settings.companyName; state.estAddress = settings.address;
     state.estPhone = settings.phone; state.estEmail = settings.email;
@@ -1252,6 +1255,7 @@ async function saveSettings() {
     state.estNcc = settings.ncc; state.estTaxRegime = settings.taxRegime;
     state.estTaxCenter = settings.taxCenter; state.estBankDetails = settings.bankDetails;
     state.estVatRate = String(settings.vatRate || 0);
+    state.estLowStockAlertsEnabled = !!settings.lowStockAlertsEnabled;
     flashToast('Établissement mis à jour');
     rerender();
   } catch (e) { flashToast(e.message); }
@@ -1398,7 +1402,7 @@ async function deleteClient(id) {
 }
 function resetEmployeeForm() {
   state.showAddEmployee = false; state.editingEmployeeId = null;
-  state.neName = ''; state.neRole = 'Caissier'; state.neCustomRole = ''; state.nePhone = ''; state.neDepotId = ''; state.nePassword = '';
+  state.neName = ''; state.neRole = 'Caissier'; state.neCustomRole = ''; state.nePhone = ''; state.neEmail = ''; state.neDepotId = ''; state.nePassword = '';
 }
 function openAddEmployeeForm() {
   resetEmployeeForm();
@@ -1409,7 +1413,7 @@ function openEditEmployeeForm(id) {
   const e = state.employees.find((emp) => emp.id === id);
   if (!e) return;
   state.editingEmployeeId = id;
-  state.neName = e.name; state.nePhone = e.phone || ''; state.neDepotId = e.depotId || '';
+  state.neName = e.name; state.nePhone = e.phone || ''; state.neEmail = e.email || ''; state.neDepotId = e.depotId || '';
   // A stored role outside the fixed list only happens via a free-text
   // "Autre" entry — reselect Autre and prefill the custom field so editing
   // doesn't silently discard it.
@@ -1428,7 +1432,7 @@ async function addEmployee() {
   if (!role) { flashToast('Précisez le poste'); return; }
   try {
     const employee = await api('POST', '/api/employees', {
-      name: state.neName.trim(), role, phone: state.nePhone, depotId: state.neDepotId || null, password: state.nePassword,
+      name: state.neName.trim(), role, phone: state.nePhone, email: state.neEmail, depotId: state.neDepotId || null, password: state.nePassword,
     });
     state.employees.push(employee);
     resetEmployeeForm();
@@ -1442,7 +1446,7 @@ async function updateEmployee() {
   if (!role) { flashToast('Précisez le poste'); return; }
   try {
     const updated = await api('PATCH', `/api/employees/${state.editingEmployeeId}`, {
-      name: state.neName.trim(), role, phone: state.nePhone, depotId: state.neDepotId || null,
+      name: state.neName.trim(), role, phone: state.nePhone, email: state.neEmail, depotId: state.neDepotId || null,
     });
     const idx = state.employees.findIndex((e) => e.id === updated.id);
     if (idx >= 0) state.employees[idx] = updated;
@@ -1597,15 +1601,30 @@ function renderOfflineChip() {
     : `${pending} vente(s) en attente · Synchroniser`;
   return `<div class="offline-chip" data-action="syncOfflineNow" title="Synchroniser maintenant">${label}</div>`;
 }
+// Count of products at or under their minStock threshold at the currently
+// active dépôt (state.currentDepotId — the same "which dépôt" concept Caisse
+// sells from) — negative/rupture/faible all count, "OK" doesn't (mirrors
+// stockStatus()'s own cls, the same function the Stocks table badges use).
+function lowStockCount() {
+  return state.products.filter((p) => stockStatus(stockAt(p, state.currentDepotId), p.minStock).cls !== 'ok').length;
+}
+function renderLowStockChip() {
+  const n = lowStockCount();
+  if (n === 0) return '';
+  return `<div class="offline-chip blocked" data-action="goToLowStock" title="Voir les produits en stock bas">⚠ ${n} produit${n > 1 ? 's' : ''} en stock bas</div>`;
+}
 function renderTopbar() {
   const t = TITLES[state.screen] || TITLES.dashboard;
   const today = new Date().toLocaleDateString('fr-FR', { weekday: 'long', day: 'numeric', month: 'long' });
+  const backBtnHtml = state.screen !== 'dashboard'
+    ? `<div class="back-btn" data-action="nav" data-screen="dashboard" title="Retour au tableau de bord" aria-label="Retour au tableau de bord">${ICON_BACK}</div>` : '';
   return `<div class="topbar">
     <div style="display:flex;align-items:center;gap:12px;min-width:0">
       <div class="menu-toggle" data-action="toggleMobileNav" aria-label="Menu">${ICON_MENU}</div>
+      ${backBtnHtml}
       <div style="min-width:0"><div class="topbar-title">${t[0]}</div><div class="topbar-subtitle">${t[1]}</div></div>
     </div>
-    <div style="display:flex;align-items:center;gap:16px">${renderOfflineChip()}<div class="topbar-date">${esc(today)}</div></div>
+    <div style="display:flex;align-items:center;gap:16px">${renderLowStockChip()}${renderOfflineChip()}<div class="topbar-date">${esc(today)}</div></div>
   </div>`;
 }
 
@@ -1778,9 +1797,13 @@ function renderStocks() {
   const filterId = state.stockDepotFilter || 'all';
   let list = state.products;
   if (state.stockCatFilter !== 'all') list = list.filter((p) => p.categoryId === state.stockCatFilter);
+  if (state.stockLowOnly) {
+    list = list.filter((p) => stockStatus(filterId === 'all' ? stockTotal(p) : stockAt(p, filterId), p.minStock).cls !== 'ok');
+  }
   if (state.stockSearch.trim()) {
     const q = state.stockSearch.trim().toLowerCase();
-    list = list.filter((p) => p.name.toLowerCase().includes(q) || (p.location || '').toLowerCase().includes(q));
+    list = list.filter((p) => p.name.toLowerCase().includes(q) || (p.location || '').toLowerCase().includes(q)
+      || (p.barcode || '').toLowerCase().includes(q) || (p.extraBarcodes || []).some((b) => b.toLowerCase().includes(q)));
   }
   const catById = {}; state.categories.forEach((c) => { catById[c.id] = c; });
 
@@ -1801,6 +1824,7 @@ function renderStocks() {
       ? ` <span style="font-size:11px;color:var(--danger);font-weight:600">Supprimer ?</span> <span style="cursor:pointer;color:var(--danger);vertical-align:middle" data-action="confirmDeleteProduct" data-id="${p.id}" title="Confirmer">${ICON_CHECK}</span> <span style="cursor:pointer;color:var(--muted);vertical-align:middle" data-action="cancelDeleteProduct" title="Annuler">${ICON_CLOSE}</span>`
       : ` <span style="cursor:pointer;color:var(--muted);vertical-align:middle" data-action="editProduct" data-id="${p.id}" title="Modifier">${ICON_EDIT}</span> <span style="cursor:pointer;color:var(--danger);vertical-align:middle" data-action="askDeleteProduct" data-id="${p.id}" title="Supprimer">${ICON_TRASH}</span>`;
     return `<tr>
+      <td style="font-variant-numeric:tabular-nums;color:var(--muted);font-size:12.5px">${esc(p.barcode)}</td>
       <td style="font-weight:600">${p.image ? `<img class="product-thumb" src="${p.image}" alt="" />` : ''}${esc(p.name)}${nameActionsHtml}${packagingHint}</td>
       <td><span class="dot" style="background:${cat ? cat.color : '#888'}"></span>${cat ? esc(cat.name) : '—'}</td>
       <td>${p.location ? esc(p.location) : '<span style="color:var(--muted)">—</span>'}</td>
@@ -1854,6 +1878,7 @@ function renderStocks() {
           ${catOptions}
         </select>
         ${renderDepotFilter('stockDepotFilter', true)}
+        <div class="add-btn" style="${state.stockLowOnly ? 'background:var(--danger)' : 'background:#fff;color:var(--danger);border:1px solid var(--border)'}" data-action="toggleStockLowOnly" title="N'afficher que les produits en stock faible ou en rupture">${state.stockLowOnly ? '✓ ' : ''}⚠ Stock bas uniquement</div>
       </div>
       ${isManager ? `<div style="display:flex;gap:10px">
         ${state.depots.length > 1 ? `<div class="add-btn" style="background:#fff;color:var(--green);border:1px solid var(--border)" data-action="toggleTransfer">⇄ Transférer du stock</div>` : ''}
@@ -1868,7 +1893,7 @@ function renderStocks() {
     ${restockHtml}
     ${addFormHtml}
     <div class="table-card"><table class="data-table">
-      <tr><th>PRODUIT</th><th>CATÉGORIE</th><th>EMPLACEMENT</th><th class="right">PRIX</th><th class="center">STOCK</th><th class="center">STATUT</th>${isManager ? '<th class="center">AJUSTER</th>' : ''}</tr>
+      <tr><th>CODE-BARRES</th><th>PRODUIT</th><th>CATÉGORIE</th><th>EMPLACEMENT</th><th class="right">PRIX</th><th class="center">STOCK</th><th class="center">STATUT</th>${isManager ? '<th class="center">AJUSTER</th>' : ''}</tr>
       ${rowsHtml}
     </table></div>
   </div>`;
@@ -2184,7 +2209,9 @@ function renderAvailabilityForm() {
 
 function renderMessageLogTable() {
   const rows = state.messageLog.slice(0, 50).map((m) => {
-    const typeLabel = m.type === 'credit-reminder' ? 'Rappel de crédit' : 'Disponibilité' + (m.productName ? ' — ' + esc(m.productName) : '');
+    const typeLabel = m.type === 'credit-reminder' ? 'Rappel de crédit'
+      : m.type === 'low-stock-alert' ? 'Stock bas' + (m.productName ? ' — ' + esc(m.productName) : '')
+      : 'Disponibilité' + (m.productName ? ' — ' + esc(m.productName) : '');
     const recipientsLabel = m.recipientNames.length > 2
       ? m.recipientNames.length + ' destinataires'
       : m.recipientNames.map(esc).join(', ');
@@ -2398,6 +2425,7 @@ function renderEmployes() {
       <td style="font-weight:600">${esc(e.name)}</td>
       <td><span class="badge" style="${roleStyle}">${esc(e.role)}</span></td>
       <td>${esc(e.phone)}</td>
+      <td>${e.email ? esc(e.email) : '—'}</td>
       <td>${e.depotId ? esc(depotName(e.depotId)) : 'Tous les dépôts'}</td>
       <td class="center"><span class="badge" style="cursor:pointer;${statusStyle}" data-action="toggleEmployeeActive" data-id="${e.id}">${e.active ? 'Actif' : 'Inactif'}</span></td>
       <td class="center">${actionsHtml}</td>
@@ -2412,6 +2440,7 @@ function renderEmployes() {
     <select id="field-neRole" class="field" data-bind="neRole">${roleOptionsHtml}</select>
     ${customRoleHtml}
     <input id="field-nePhone" class="field" type="text" placeholder="Téléphone" value="${esc(state.nePhone)}" data-bind="nePhone" />
+    <input id="field-neEmail" class="field" type="email" placeholder="Email (optionnel, pour les alertes)" value="${esc(state.neEmail)}" data-bind="neEmail" />
     <select id="field-neDepotId" class="field" data-bind="neDepotId"><option value="">Tous les dépôts</option>${depotOptions}</select>
     ${passwordFieldHtml}
     <div class="save-btn" data-action="saveEmployee">${isEditing ? 'Mettre à jour' : 'Enregistrer'}</div>
@@ -2420,7 +2449,7 @@ function renderEmployes() {
     <div style="display:flex;justify-content:flex-end;margin-bottom:16px"><div class="add-btn" data-action="toggleAddEmployee">+ Ajouter un employé</div></div>
     ${addFormHtml}
     <div class="table-card"><table class="data-table">
-      <tr><th>NOM</th><th>RÔLE</th><th>TÉLÉPHONE</th><th>DÉPÔT</th><th class="center">STATUT</th><th class="center">ACTIONS</th></tr>
+      <tr><th>NOM</th><th>RÔLE</th><th>TÉLÉPHONE</th><th>EMAIL</th><th>DÉPÔT</th><th class="center">STATUT</th><th class="center">ACTIONS</th></tr>
       ${rows}
     </table></div>
   </div>`;
@@ -2447,6 +2476,11 @@ function renderEtablissement() {
         <input id="field-estTaxCenter" class="field-lg" type="text" placeholder="Centre des impôts" value="${esc(state.estTaxCenter)}" data-bind="estTaxCenter" />
         <input id="field-estBankDetails" class="field-lg" type="text" placeholder="Références bancaires" value="${esc(state.estBankDetails)}" data-bind="estBankDetails" />
         <input id="field-estVatRate" class="field-lg" type="number" min="0" max="100" step="0.5" placeholder="Taux de TVA (%) — laisser 0 si non applicable" value="${esc(state.estVatRate)}" data-bind="estVatRate"${state.fneTaxCode ? ' readonly title="Déterminé par le code TVA FNE ci-dessous"' : ''} />
+        <div class="card-title" style="font-size:12.5px;margin:6px 0 0">Alertes stock</div>
+        <label style="display:flex;align-items:center;gap:8px;font-size:13px;font-weight:600">
+          <input type="checkbox" data-action="toggleEstLowStockAlertsEnabled"${state.estLowStockAlertsEnabled ? ' checked' : ''} /> Envoyer un SMS/email aux Gérants quand un produit passe sous son seuil minimum
+        </label>
+        <div class="pos-hint" style="margin:0">Réutilise la configuration Email/SMS ci-dessous — sans elle, l'alerte visuelle dans l'app fonctionne quand même mais rien n'est envoyé.</div>
         <div>
           <div style="font-size:12px;color:var(--muted);margin-bottom:6px">Logo</div>
           ${logoPreview}
@@ -2903,6 +2937,8 @@ const Actions = {
   workOffline: (ds) => workOffline(ds.key),
   syncOfflineNow: () => syncOfflineSales(),
   nav: (ds) => { state.screen = ds.screen; state.pwError = null; state.pwSuccess = null; state.confirmDeleteEmployeeId = null; state.confirmDeleteProductId = null; state.confirmDeleteClientId = null; state.mobileNavOpen = false; rerender(); },
+  goToLowStock: () => { state.screen = 'stocks'; state.stockLowOnly = true; state.mobileNavOpen = false; rerender(); },
+  toggleStockLowOnly: () => { state.stockLowOnly = !state.stockLowOnly; rerender(); },
   toggleMobileNav: () => { state.mobileNavOpen = !state.mobileNavOpen; rerender(); },
   closeMobileNav: () => { state.mobileNavOpen = false; rerender(); },
   openExternal: (ds) => { window.open(ds.url, '_blank', 'noopener'); },
@@ -3007,6 +3043,7 @@ const Actions = {
   submitChangePassword: () => changePassword(),
   saveSettings: () => saveSettings(),
   removeLogo: () => { state.estLogo = ''; rerender(); },
+  toggleEstLowStockAlertsEnabled: () => { state.estLowStockAlertsEnabled = !state.estLowStockAlertsEnabled; rerender(); },
   toggleFneEnabled: () => { state.fneEnabled = !state.fneEnabled; rerender(); },
   saveFNEConfig: () => saveFNEConfig(),
   toggleMsgCfgEmailEnabled: () => { state.msgCfgEmailEnabled = !state.msgCfgEmailEnabled; rerender(); },

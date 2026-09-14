@@ -116,7 +116,7 @@ function buildSeed() {
   ];
   const products = productsRaw.map((p, i) => {
     const { stock, ...rest } = p;
-    return Object.assign({ unitsPerPack: 0, pricePerPack: 0, unitsPerCarton: 0, pricePerCarton: 0, location: '', weight: 0, extraBarcodes: [] }, rest, {
+    return Object.assign({ unitsPerPack: 0, pricePerPack: 0, unitsPerCarton: 0, pricePerCarton: 0, location: '', weight: 0, extraBarcodes: [], lowStockAlerted: {} }, rest, {
       stockByDepot: splitStock(stock, depotIds, [0.6]),
       barcode: '20000000000' + String(i + 1).padStart(2, '0'),
     });
@@ -129,10 +129,10 @@ function buildSeed() {
     { id: 'cl5', name: 'Mariam Zongo', phone: '+226 76 50 60 70', points: 410, totalSpent: 152000 },
   ];
   const employees = [
-    { id: 'e1', name: 'Ismaël Nassua', role: 'Gérant', phone: '+226 70 00 00 01', active: true, depotId: null },
-    { id: 'e2', name: 'Adama Kéré', role: 'Caissier', phone: '+226 70 00 00 02', active: true, depotId: 'd1' },
-    { id: 'e3', name: 'Salimata Diallo', role: 'Caissier', phone: '+226 70 00 00 03', active: true, depotId: 'd2' },
-    { id: 'e4', name: 'Yacouba Sanou', role: 'Caissier', phone: '+226 70 00 00 04', active: false, depotId: 'd1' },
+    { id: 'e1', name: 'Ismaël Nassua', role: 'Gérant', phone: '+226 70 00 00 01', email: '', active: true, depotId: null },
+    { id: 'e2', name: 'Adama Kéré', role: 'Caissier', phone: '+226 70 00 00 02', email: '', active: true, depotId: 'd1' },
+    { id: 'e3', name: 'Salimata Diallo', role: 'Caissier', phone: '+226 70 00 00 03', email: '', active: true, depotId: 'd2' },
+    { id: 'e4', name: 'Yacouba Sanou', role: 'Caissier', phone: '+226 70 00 00 04', email: '', active: false, depotId: 'd1' },
   ].map((e) => Object.assign(e, hashPassword(DEFAULT_PASSWORD)));
   const empDepot = {}; employees.forEach((e) => { empDepot[e.name] = e.depotId; });
   const depotName = {}; depots.forEach((d) => { depotName[d.id] = d.name; });
@@ -241,6 +241,9 @@ function migrateTenantData(data) {
   (data.clients || []).forEach((c) => {
     if (c.email === undefined) { c.email = ''; changed = true; }
   });
+  (data.employees || []).forEach((e) => {
+    if (e.email === undefined) { e.email = ''; changed = true; }
+  });
   (data.products || []).forEach((p) => {
     if (p.unitsPerPack === undefined) {
       p.unitsPerPack = 0; p.pricePerPack = 0; p.unitsPerCarton = 0; p.pricePerCarton = 0;
@@ -249,10 +252,15 @@ function migrateTenantData(data) {
     if (p.location === undefined) { p.location = ''; changed = true; }
     if (p.weight === undefined) { p.weight = 0; changed = true; }
     if (p.extraBarcodes === undefined) { p.extraBarcodes = []; changed = true; }
+    if (p.lowStockAlerted === undefined) { p.lowStockAlerted = {}; changed = true; }
   });
   if (!data.settings) { data.settings = defaultSettings(); changed = true; }
   else if (data.settings.ncc === undefined) {
     Object.assign(data.settings, { ncc: '', taxRegime: '', taxCenter: '', bankDetails: '', vatRate: 0 });
+    changed = true;
+  }
+  if (data.settings && data.settings.lowStockAlertsEnabled === undefined) {
+    data.settings.lowStockAlertsEnabled = false;
     changed = true;
   }
   if (!data.fneConfig) { data.fneConfig = defaultFneConfig(); changed = true; }
@@ -528,6 +536,7 @@ function defaultSettings(companyName) {
     // app.js) — NCC/régime/centre des impôts/RIB have no sensible fallback,
     // left blank until the shop fills them in rather than fabricated.
     ncc: '', taxRegime: '', taxCenter: '', bankDetails: '', vatRate: 0,
+    lowStockAlertsEnabled: false,
   };
 }
 // A data: URI logo is stored inline in the tenant's JSON (no file storage in
@@ -595,6 +604,78 @@ function packagingInfo(product, unit) {
   if (unit === 'pack' && product.unitsPerPack > 0) return { price: product.pricePerPack, multiplier: product.unitsPerPack };
   if (unit === 'carton' && product.unitsPerCarton > 0) return { price: product.pricePerCarton, multiplier: product.unitsPerCarton };
   return { price: product.price, multiplier: 1 };
+}
+// Automatic low-stock alerting: the first time a product's stock at a given
+// dépôt drops to or below its minStock threshold, sends a real SMS/email to
+// every active Gérant, then stays silent on further stock movement at that
+// dépôt (product.lowStockAlerted[depotId] tracks this) until a restock
+// pushes it back above the threshold — otherwise a slow-moving product
+// sitting just under its threshold would re-alert on every subsequent sale.
+// Deliberately a no-op whenever the shop hasn't turned the feature on
+// (db.settings.lowStockAlertsEnabled): while off, lowStockAlerted is never
+// touched, so turning it on later re-evaluates every product fresh instead
+// of having silently "pre-armed" itself against products that were already
+// low the whole time the toggle was off.
+async function checkLowStockAlert(db, product, depotId) {
+  if (!db.settings || !db.settings.lowStockAlertsEnabled) return;
+  if (!product.lowStockAlerted) product.lowStockAlerted = {};
+  const qty = stockAt(product, depotId);
+  if (qty > product.minStock) {
+    if (product.lowStockAlerted[depotId]) delete product.lowStockAlerted[depotId];
+    return;
+  }
+  if (product.lowStockAlerted[depotId]) return; // already alerted, not yet restocked
+  product.lowStockAlerted[depotId] = true;
+
+  const cfg = db.messagingConfig || defaultMessagingConfig();
+  const canSendEmail = !!(cfg.email.enabled && cfg.email.gmailUser && cfg.email.gmailAppPassword);
+  const canSendSms = !!(cfg.sms.enabled && cfg.sms.clientId && cfg.sms.clientSecret && cfg.sms.senderAddress);
+  if (!canSendEmail && !canSendSms) return; // nothing configured to actually send with
+
+  const managers = db.employees.filter((e) => e.role === 'Gérant' && e.active);
+  if (managers.length === 0) return;
+  const depot = db.depots.find((d) => d.id === depotId);
+  const shopName = (db.settings.companyName || '').trim() || 'NassuaGroup';
+  const message = `Alerte stock bas — ${shopName} : ${product.name} est à ${qty} unité(s) au ${depot ? depot.name : depotId} (seuil : ${product.minStock}).`;
+  const recipientIds = managers.map((m) => m.id);
+  const recipientNames = managers.map((m) => m.name);
+
+  // One log entry per channel actually attempted (not one mixed-channel
+  // entry) — reuses the exact same db.messageLog/sendResults shape the
+  // manual credit-reminder/availability messages already use, with zero
+  // client-side rendering changes needed beyond a new type label.
+  for (const channel of canSendEmail && canSendSms ? ['email', 'sms'] : canSendEmail ? ['email'] : ['sms']) {
+    const sendResults = [];
+    for (const m of managers) {
+      const contact = channel === 'email' ? m.email : m.phone;
+      if (!contact) {
+        sendResults.push({ employeeId: m.id, ok: false, error: channel === 'email' ? "Pas d'email enregistré" : 'Pas de téléphone enregistré' });
+        continue;
+      }
+      try {
+        if (channel === 'email') await sendEmailViaGmail(cfg.email, contact, 'Alerte stock bas', message);
+        else await sendSmsViaOrange(cfg.sms, contact, message);
+        sendResults.push({ employeeId: m.id, ok: true });
+      } catch (e) {
+        sendResults.push({ employeeId: m.id, ok: false, error: e.message });
+      }
+    }
+    db.messageLog.unshift({
+      id: uid('msg'),
+      type: 'low-stock-alert',
+      channel,
+      recipientIds,
+      recipientNames,
+      message,
+      subject: 'Alerte stock bas',
+      productId: product.id,
+      productName: product.name,
+      recordedBy: 'Système',
+      sentAt: new Date().toISOString(),
+      sent: true,
+      sendResults,
+    });
+  }
 }
 // Builds a sale record from a cart, shared by the normal online POST
 // /api/checkout and the offline-sync endpoint. The two modes genuinely
@@ -866,7 +947,7 @@ async function handleApi(req, res, pathname) {
     if (phoneUsedByAnyTenant(managerPhone)) return sendJSON(res, 409, { error: 'Ce numéro de téléphone est déjà utilisé sur une autre boutique' });
     const tenantId = uid('t');
     const managerEmployee = Object.assign(
-      { id: uid('e'), name: managerName, role: 'Gérant', phone: managerPhone, active: true, depotId: null },
+      { id: uid('e'), name: managerName, role: 'Gérant', phone: managerPhone, email: '', active: true, depotId: null },
       hashPassword(managerPassword)
     );
     const newDb = {
@@ -1058,7 +1139,7 @@ async function handleApi(req, res, pathname) {
     if (phoneUsedByAnyTenant(phone)) return sendJSON(res, 409, { error: 'Ce numéro de téléphone est déjà utilisé par un autre employé' });
     const role = resolveEmployeeRole(body.role);
     const employee = Object.assign({
-      id: uid('e'), name, role, phone, active: true,
+      id: uid('e'), name, role, phone, email: (body.email || '').trim(), active: true,
       depotId: body.depotId || null,
     }, hashPassword(password));
     db.employees.push(employee);
@@ -1102,6 +1183,7 @@ async function handleApi(req, res, pathname) {
       }
       employee.phone = phone;
     }
+    if (body.email !== undefined) employee.email = body.email.trim();
     if (body.depotId !== undefined) employee.depotId = body.depotId || null;
     saveTenant(session.tenantId);
     return sendJSON(res, 200, publicEmployee(employee));
@@ -1156,6 +1238,7 @@ async function handleApi(req, res, pathname) {
       image: typeof body.image === 'string' ? body.image : '',
       location: (body.location || '').trim(),
       weight: Number(body.weight) || 0,
+      lowStockAlerted: {},
     };
     db.products.push(product);
     saveTenant(session.tenantId);
@@ -1248,6 +1331,11 @@ async function handleApi(req, res, pathname) {
 
     let created = 0, updated = 0;
     const errors = [];
+    // (product, depotId) pairs whose stock was actually touched by this
+    // import — checked against the low-stock threshold once, after the
+    // synchronous row loop below, since checkLowStockAlert is async and a
+    // plain forEach can't await mid-iteration.
+    const touchedStock = [];
 
     rows.forEach((row, idx) => {
       try {
@@ -1350,11 +1438,13 @@ async function handleApi(req, res, pathname) {
             const qty = Number(val);
             if (!Number.isFinite(qty) || qty < 0) throw new Error(`Stock ${depotName} invalide`);
             product.stockByDepot[depot.id] = qty;
+            touchedStock.push({ product, depotId: depot.id });
           });
           updated++;
         } else {
           const stockByDepot = {};
           db.depots.forEach((d) => { stockByDepot[d.id] = 0; });
+          const explicitDepotIds = [];
           Object.keys(row.stockByDepotName || {}).forEach((depotName) => {
             const depot = findDepot(depotName);
             if (!depot) return;
@@ -1362,8 +1452,9 @@ async function handleApi(req, res, pathname) {
             const qty = val === undefined || val === null || val === '' ? 0 : Number(val);
             if (!Number.isFinite(qty) || qty < 0) throw new Error(`Stock ${depotName} invalide`);
             stockByDepot[depot.id] = qty;
+            explicitDepotIds.push(depot.id);
           });
-          db.products.push({
+          const newProduct = {
             id: uid('p'), name,
             categoryId: categoryId || (db.categories[0] && db.categories[0].id) || '',
             supplierId: supplierId || (db.suppliers[0] && db.suppliers[0].id) || '',
@@ -1375,7 +1466,13 @@ async function handleApi(req, res, pathname) {
             unitsPerPack: unitsPerPack || 0, pricePerPack: pricePerPack || 0,
             unitsPerCarton: unitsPerCarton || 0, pricePerCarton: pricePerCarton || 0,
             location: location || '', weight: weight || 0,
-          });
+            lowStockAlerted: {},
+          };
+          db.products.push(newProduct);
+          // Only depots the row actually named a stock value for — not every
+          // depot defaulted to 0 — or importing a catalog with no stock
+          // columns at all would alert on every single new product.
+          explicitDepotIds.forEach((depotId) => touchedStock.push({ product: newProduct, depotId }));
           created++;
         }
       } catch (e) {
@@ -1390,6 +1487,9 @@ async function handleApi(req, res, pathname) {
       }
     });
 
+    for (const { product, depotId } of touchedStock) {
+      await checkLowStockAlert(db, product, depotId);
+    }
     if (created + updated > 0) saveTenant(session.tenantId);
     return sendJSON(res, 200, {
       created, updated, errors,
@@ -1406,6 +1506,7 @@ async function handleApi(req, res, pathname) {
     if (!depotId || !db.depots.some((d) => d.id === depotId)) return sendJSON(res, 400, { error: 'Dépôt invalide' });
     const delta = Number(body.delta) || 0;
     product.stockByDepot[depotId] = Math.max(0, stockAt(product, depotId) + delta);
+    await checkLowStockAlert(db, product, depotId);
     saveTenant(session.tenantId);
     return sendJSON(res, 200, product);
   }
@@ -1421,6 +1522,8 @@ async function handleApi(req, res, pathname) {
     if (stockAt(product, fromDepotId) < qty) return sendJSON(res, 409, { error: 'Stock insuffisant au dépôt source' });
     product.stockByDepot[fromDepotId] -= qty;
     product.stockByDepot[toDepotId] = stockAt(product, toDepotId) + qty;
+    await checkLowStockAlert(db, product, fromDepotId);
+    await checkLowStockAlert(db, product, toDepotId);
     saveTenant(session.tenantId);
     return sendJSON(res, 200, product);
   }
@@ -1432,6 +1535,10 @@ async function handleApi(req, res, pathname) {
     const result = buildSaleFromCart(db, depot, body, { tolerateNegativeStock: false });
     if (result.error) return sendJSON(res, result.status || 400, { error: result.error });
     db.sales.unshift(result.sale);
+    for (const it of result.sale.items) {
+      const product = db.products.find((p) => p.id === it.productId);
+      if (product) await checkLowStockAlert(db, product, depot.id);
+    }
     saveTenant(session.tenantId);
     return sendJSON(res, 201, { sale: result.sale });
   }
@@ -1460,6 +1567,10 @@ async function handleApi(req, res, pathname) {
       if (result.error) { results.push({ offlineKey, error: result.error }); continue; }
       result.sale.offlineKey = offlineKey;
       db.sales.unshift(result.sale);
+      for (const it of result.sale.items) {
+        const product = db.products.find((p) => p.id === it.productId);
+        if (product) await checkLowStockAlert(db, product, depot.id);
+      }
       results.push({ offlineKey, sale: result.sale });
     }
     saveTenant(session.tenantId);
@@ -1636,6 +1747,7 @@ async function handleApi(req, res, pathname) {
       taxCenter: (body.taxCenter || '').trim(),
       bankDetails: (body.bankDetails || '').trim(),
       vatRate,
+      lowStockAlertsEnabled: !!body.lowStockAlertsEnabled,
     };
     saveTenant(session.tenantId);
     return sendJSON(res, 200, db.settings);
