@@ -797,6 +797,13 @@ function openEditProductForm(id) {
   state.npUnitsPerPack = p.unitsPerPack || ''; state.npPricePerPack = p.pricePerPack || '';
   state.npUnitsPerCarton = p.unitsPerCarton || ''; state.npPricePerCarton = p.pricePerCarton || '';
   state.npImage = p.image || ''; state.npLocation = p.location || ''; state.npWeight = p.weight || '';
+  // Stock is per-dépôt, so editing it needs a concrete dépôt to show/target —
+  // default to whichever one the Stocks screen is currently filtered to
+  // (matching the ±stepper's own convention), falling back to the operating
+  // dépôt when "Tous les dépôts" is selected (always a real dépôt, never
+  // "all", per the app's dépôt-switching design).
+  state.npDepotId = (state.stockDepotFilter && state.stockDepotFilter !== 'all') ? state.stockDepotFilter : state.currentDepotId;
+  state.npStock = stockAt(p, state.npDepotId);
   state.showAddProduct = true;
 }
 function saveProduct() {
@@ -821,6 +828,7 @@ async function addProduct() {
 async function updateProduct() {
   if (!state.npName.trim()) return;
   try {
+    const original = state.products.find((p) => p.id === state.editingProductId);
     const updated = await api('PATCH', `/api/products/${state.editingProductId}`, {
       name: state.npName.trim(), barcode: state.npBarcode.trim(), extraBarcodes: parseExtraBarcodesInput(state.npExtraBarcodes), categoryId: state.npCategoryId, supplierId: state.npSupplierId,
       price: Number(state.npPrice) || 0, cost: Number(state.npCost) || 0, minStock: Number(state.npMinStock) || 10,
@@ -830,6 +838,19 @@ async function updateProduct() {
     });
     const idx = state.products.findIndex((p) => p.id === updated.id);
     if (idx >= 0) state.products[idx] = updated;
+    // Stock is per-dépôt and deliberately not part of the PATCH above — it's
+    // applied as a second call through the existing delta-based adjust-stock
+    // endpoint (not a new "set absolute stock" route), so editing it here
+    // also runs through the same low-stock-alert check as every other
+    // stock-mutating path (steppers, restock, transfer, checkout...).
+    if (original && state.npDepotId) {
+      const before = stockAt(original, state.npDepotId);
+      const after = Number(state.npStock);
+      if (Number.isFinite(after) && after !== before) {
+        const withStock = await api('PATCH', `/api/products/${state.editingProductId}/stock`, { depotId: state.npDepotId, delta: after - before });
+        if (idx >= 0) state.products[idx] = withStock;
+      }
+    }
     resetProductForm();
     flashToast('Produit mis à jour : ' + updated.name);
     rerender();
@@ -1852,10 +1873,10 @@ function renderStocks() {
     </div>
     <select id="field-npCategoryId" class="field" data-bind="npCategoryId">${npCatOptions}</select>
     <select id="field-npSupplierId" class="field" data-bind="npSupplierId">${npSupOptions}</select>
-    ${isEditingProduct ? '' : `<select id="field-npDepotId" class="field" data-bind="npDepotId" title="Dépôt de réception du stock initial">${npDepotOptions}</select>`}
+    <select id="field-npDepotId" class="field" data-bind="npDepotId" title="${isEditingProduct ? 'Dépôt dont modifier le stock' : 'Dépôt de réception du stock initial'}">${npDepotOptions}</select>
     <input id="field-npPrice" class="field" type="number" placeholder="Prix vente au détail (FCFA)" value="${esc(state.npPrice)}" data-bind="npPrice" />
     <input id="field-npCost" class="field" type="number" placeholder="Prix achat (FCFA)" value="${esc(state.npCost)}" data-bind="npCost" />
-    ${isEditingProduct ? '' : `<input id="field-npStock" class="field" type="number" placeholder="Stock initial" value="${esc(state.npStock)}" data-bind="npStock" />`}
+    <input id="field-npStock" class="field" type="number" placeholder="${isEditingProduct ? `Stock (${state.depots.find((d) => d.id === state.npDepotId) ? state.depots.find((d) => d.id === state.npDepotId).name : ''})` : 'Stock initial'}" value="${esc(state.npStock)}" data-bind="npStock" />
     <input id="field-npMinStock" class="field" type="number" placeholder="Seuil minimum" value="${esc(state.npMinStock)}" data-bind="npMinStock" />
     <input id="field-npLocation" class="field" type="text" placeholder="Emplacement en magasin (ex: Allée 3, Étagère B)" value="${esc(state.npLocation)}" data-bind="npLocation" />
     <input id="field-npWeight" class="field" type="number" step="0.01" placeholder="Poids (kg, optionnel)" value="${esc(state.npWeight)}" data-bind="npWeight" />
@@ -3112,6 +3133,13 @@ function onChange(e) {
     state.dashDepotFilter = el.value;
     state.repDepotFilter = el.value;
     state.expenseDepotFilter = el.value;
+  } else if (bind === 'npDepotId' && state.editingProductId) {
+    // Editing an existing product's stock is per-dépôt — switching the
+    // dépôt select must refresh the shown quantity to that dépôt's own
+    // stock, or saving would apply the previously-shown dépôt's number to
+    // the newly selected one instead.
+    const p = state.products.find((pp) => pp.id === state.editingProductId);
+    if (p) state.npStock = stockAt(p, state.npDepotId);
   } else if (bind === 'rsProductId') {
     // A unit picked for the previous product may not apply to the new one
     // (e.g. it has no carton configured) — reset to avoid a stale mismatch.
