@@ -263,6 +263,10 @@ function migrateTenantData(data) {
     data.settings.lowStockAlertsEnabled = false;
     changed = true;
   }
+  if (data.settings && data.settings.loyaltyPointValueFcfa === undefined) {
+    data.settings.loyaltyPointValueFcfa = 0;
+    changed = true;
+  }
   if (!data.fneConfig) { data.fneConfig = defaultFneConfig(); changed = true; }
   return changed;
 }
@@ -537,6 +541,11 @@ function defaultSettings(companyName) {
     // left blank until the shop fills them in rather than fabricated.
     ncc: '', taxRegime: '', taxCenter: '', bankDetails: '', vatRate: 0,
     lowStockAlertsEnabled: false,
+    // FCFA value of one loyalty point when redeemed as a discount at Caisse
+    // (points are earned automatically, 1 per 100 FCFA spent — see
+    // buildSaleFromCart). 0 means redemption is effectively off until the
+    // shop sets a real rate, rather than a fabricated default.
+    loyaltyPointValueFcfa: 0,
   };
 }
 // A data: URI logo is stored inline in the tenant's JSON (no file storage in
@@ -705,7 +714,11 @@ function buildSaleFromCart(db, depot, body, opts) {
     return { error: 'Un client est requis pour une vente à crédit' };
   }
 
-  let items, total, advance = 0;
+  const client = body.clientId ? db.clients.find((c) => c.id === body.clientId) : null;
+  const pointValue = (db.settings && db.settings.loyaltyPointValueFcfa) || 0;
+  const pointsRedeemed = Math.max(0, Math.floor(Number(body.pointsRedeemed) || 0));
+
+  let items, total, subtotal, advance = 0, pointsDiscount = 0, pointsConflict = false;
 
   if (!tolerateNegativeStock) {
     // Validate the whole cart before mutating anything.
@@ -720,10 +733,17 @@ function buildSaleFromCart(db, depot, body, opts) {
       }
       precomputedTotal += pkg.price * ci.qty;
     }
+    if (pointsRedeemed > 0) {
+      if (!client) return { error: 'Un client est requis pour utiliser des points de fidélité' };
+      if (pointValue <= 0) return { error: "Le programme de fidélité n'est pas configuré" };
+      if (pointsRedeemed > client.points) return { error: 'Ce client ne dispose pas de suffisamment de points', status: 409 };
+      pointsDiscount = pointsRedeemed * pointValue;
+      if (pointsDiscount > precomputedTotal) return { error: 'La réduction en points dépasse le montant de la vente' };
+    }
     if (paymentMethod === 'Crédit') {
       advance = Number(body.advance) || 0;
       if (advance < 0) return { error: 'Avance invalide' };
-      if (advance > precomputedTotal) return { error: "L'avance ne peut pas dépasser le total de la vente" };
+      if (advance > precomputedTotal - pointsDiscount) return { error: "L'avance ne peut pas dépasser le total de la vente" };
     }
 
     total = 0;
@@ -737,6 +757,7 @@ function buildSaleFromCart(db, depot, body, opts) {
       total += lineTotal;
       return { productId: product.id, name: product.name, unit: ci.unit || 'detail', qty: ci.qty, unitPrice: pkg.price, lineTotal, baseQty };
     });
+    subtotal = total;
   } else {
     total = 0;
     items = cart.map((ci) => {
@@ -760,22 +781,40 @@ function buildSaleFromCart(db, depot, body, opts) {
         unit: ci.unit || 'detail', qty, unitPrice, lineTotal, baseQty, stockConflict,
       };
     });
+    subtotal = total;
+    if (pointsRedeemed > 0) {
+      pointsDiscount = pointsRedeemed * pointValue;
+      // Already validated client-side at the moment of the offline sale, but
+      // the client's real points balance may have moved since (another
+      // device redeeming/earning during the same outage) — same accepted,
+      // flagged-for-manual-correction trade-off as the stockConflict case
+      // above, rather than rejecting an offline sale after the fact.
+      if (!client || pointsRedeemed > client.points || pointsDiscount > subtotal) pointsConflict = true;
+      pointsDiscount = Math.min(pointsDiscount, subtotal);
+    }
     if (paymentMethod === 'Crédit') {
       // Already validated client-side at the moment of the offline sale
       // (same rule as the online path) — clamp defensively rather than
       // reject, since an offline sale must never be refused after the fact.
-      advance = Math.min(Math.max(Number(body.advance) || 0, 0), total);
+      advance = Math.min(Math.max(Number(body.advance) || 0, 0), subtotal - pointsDiscount);
     }
   }
 
+  total = subtotal - pointsDiscount;
+
   let clientName = '';
-  if (body.clientId) {
-    const client = db.clients.find((c) => c.id === body.clientId);
-    if (client) {
-      clientName = client.name;
-      client.points += Math.floor(total / 100);
-      client.totalSpent += total;
-    }
+  if (client) {
+    clientName = client.name;
+    // Redeeming is deducted first, then earning is credited on the actual
+    // discounted amount paid — so points can't be spent to earn more points
+    // than the sale genuinely brought in. Left free to go negative (rather
+    // than clamped at 0) when a stale offline balance is overspent, mirroring
+    // how offline stock is left negative instead of clamped: it keeps the
+    // numbers internally honest about how much was actually oversold, for
+    // the same manual-correction workflow.
+    if (pointsRedeemed > 0) client.points -= pointsRedeemed;
+    client.points += Math.floor(total / 100);
+    client.totalSpent += total;
   }
 
   const sale = {
@@ -787,11 +826,15 @@ function buildSaleFromCart(db, depot, body, opts) {
     clientId: body.clientId || '',
     clientName,
     itemCount: items.reduce((a, it) => a + it.baseQty, 0),
+    subtotal,
+    pointsRedeemed,
+    pointsDiscount,
     total,
     paymentMethod,
     items,
   };
   if (tolerateNegativeStock && items.some((it) => it.stockConflict)) sale.stockConflict = true;
+  if (tolerateNegativeStock && pointsConflict) sale.pointsConflict = true;
   if (paymentMethod === 'Crédit') {
     sale.creditPaid = advance;
     sale.creditRemaining = total - advance;
@@ -1735,6 +1778,7 @@ async function handleApi(req, res, pathname) {
       return sendJSON(res, 400, { error: 'Logo trop volumineux (taille maximale ~500 Ko)' });
     }
     const vatRate = Math.max(0, Math.min(100, Number(body.vatRate) || 0));
+    const loyaltyPointValueFcfa = Math.max(0, Number(body.loyaltyPointValueFcfa) || 0);
     db.settings = {
       companyName: (body.companyName || '').trim(),
       address: (body.address || '').trim(),
@@ -1748,6 +1792,7 @@ async function handleApi(req, res, pathname) {
       bankDetails: (body.bankDetails || '').trim(),
       vatRate,
       lowStockAlertsEnabled: !!body.lowStockAlertsEnabled,
+      loyaltyPointValueFcfa,
     };
     saveTenant(session.tenantId);
     return sendJSON(res, 200, db.settings);
@@ -1817,6 +1862,13 @@ async function handleApi(req, res, pathname) {
           measurementUnit: it.unit === 'pack' ? 'paquet' : it.unit === 'carton' ? 'carton' : 'unité',
         };
       }),
+      // TODO: a sale paid for partly with loyalty points (sale.pointsDiscount)
+      // isn't reflected here — this always certifies the pre-discount item
+      // amounts. Real FNE certification is still blocked on Orange/DGI
+      // credentials as of the loyalty-points feature (2026-09), so this
+      // hasn't been reachable in practice yet; wire sale.pointsDiscount into
+      // this field (per DGI's own discount semantics, not verified here) if
+      // real certification is revisited.
       discount: 0,
     };
     let fneRes, fneData;

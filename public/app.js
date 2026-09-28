@@ -99,7 +99,7 @@ const state = {
   currentDepotId: '', // depot the signed-in user is currently operating / selling from
   stockDepotFilter: '', dashDepotFilter: '', repDepotFilter: '', expenseDepotFilter: '', // 'all' or a depot id
   repDateMode: 'all', repDateFrom: '', repDateTo: '', // 'all'|'day'|'week'|'month'|'custom' — Rapports date filter
-  cart: [], posCategory: 'all', posSearch: '', posClientId: '', paymentMethod: 'Espèces', posAdvance: '',
+  cart: [], posCategory: 'all', posSearch: '', posClientId: '', paymentMethod: 'Espèces', posAdvance: '', posPointsRedeemed: '',
   showUnitPicker: false, unitPickerProductId: null,
   scanInput: '', showScanner: false, scanError: null, scanMode: 'sell', scanDevices: [], scanDeviceId: '',
   stockSearch: '', stockCatFilter: 'all', stockLowOnly: false, showAddProduct: false,
@@ -121,7 +121,7 @@ const state = {
   showAddExpense: false, exCategory: EXPENSE_CATEGORIES[0], exCustomCategory: '', exAmount: '', exDepotId: '', exNote: '',
   pwCurrent: '', pwNew: '', pwConfirm: '', pwError: null, pwSuccess: null,
   estCompanyName: '', estAddress: '', estPhone: '', estEmail: '', estTaxId: '', estLogo: '',
-  estNcc: '', estTaxRegime: '', estTaxCenter: '', estBankDetails: '', estVatRate: '0', estLowStockAlertsEnabled: false,
+  estNcc: '', estTaxRegime: '', estTaxCenter: '', estBankDetails: '', estVatRate: '0', estLowStockAlertsEnabled: false, estLoyaltyPointValueFcfa: '0',
   fneEnabled: false, fneBaseUrl: '', fneTaxCode: '', fneHasApiKey: false, fneApiKeyInput: '', fneCertifying: false,
   msgCfgEmailEnabled: false, msgCfgGmailUser: '', msgCfgGmailAppPasswordInput: '', msgCfgHasAppPassword: false,
   msgCfgSmsEnabled: false, msgCfgClientId: '', msgCfgClientSecretInput: '', msgCfgHasClientSecret: false, msgCfgSenderAddress: '',
@@ -365,6 +365,7 @@ async function loadAppState() {
     state.estTaxCenter = settings.taxCenter || ''; state.estBankDetails = settings.bankDetails || '';
     state.estVatRate = String(settings.vatRate || 0);
     state.estLowStockAlertsEnabled = !!settings.lowStockAlertsEnabled;
+    state.estLoyaltyPointValueFcfa = String(settings.loyaltyPointValueFcfa || 0);
     const fneConfig = data.fneConfig || {};
     state.fneEnabled = !!fneConfig.enabled; state.fneBaseUrl = fneConfig.baseUrl || '';
     state.fneTaxCode = fneConfig.taxCode || ''; state.fneHasApiKey = !!fneConfig.hasApiKey;
@@ -521,7 +522,11 @@ function applySaleLocally(sale) {
   });
   if (sale.clientId) {
     const c = state.clients.find((cc) => cc.id === sale.clientId);
-    if (c) { c.points += Math.floor(sale.total / 100); c.totalSpent += sale.total; }
+    if (c) {
+      if (sale.pointsRedeemed) c.points -= sale.pointsRedeemed;
+      c.points += Math.floor(sale.total / 100);
+      c.totalSpent += sale.total;
+    }
   }
   state.sales.unshift(sale);
 }
@@ -587,10 +592,24 @@ function checkoutOffline() {
   if (built.error) { flashToast(built.error); rerender(); return; }
   applySaleLocally(built.sale);
   addToOutbox(built.syncPayload);
-  state.cart = []; state.posClientId = ''; state.posAdvance = '';
+  state.cart = []; state.posClientId = ''; state.posAdvance = ''; state.posPointsRedeemed = '';
   state.lastReceipt = built.sale; state.showReceipt = true; state.receiptView = 'ticket';
   rerender();
   flashToast('Vente enregistrée hors ligne — sera synchronisée au retour de la connexion.');
+}
+// Points actually applied at Caisse: the typed count, capped to the client's
+// balance and to what the cart can absorb (never a discount above the total).
+// Shared by the render and checkout() so the server always receives exactly
+// the redemption the cashier saw on screen — the server re-validates it.
+function cartTotalOf(cart) {
+  return cart.reduce((a, ci) => { const p = state.products.find((pp) => pp.id === ci.productId); return a + (p ? packagingFor(p, ci.unit).price * ci.qty : 0); }, 0);
+}
+function loyaltyRedemption(cartTotal) {
+  const client = state.posClientId ? state.clients.find((c) => c.id === state.posClientId) : null;
+  const rate = Number(state.estLoyaltyPointValueFcfa) || 0;
+  if (!client || rate <= 0 || client.points <= 0 || state.offlineMode) return { points: 0, discount: 0 };
+  const points = Math.max(0, Math.min(Math.floor(Number(state.posPointsRedeemed) || 0), client.points, Math.floor(cartTotal / rate)));
+  return { points, discount: points * rate };
 }
 async function checkout() {
   if (state.cart.length === 0) return;
@@ -603,9 +622,10 @@ async function checkout() {
     const data = await api('POST', '/api/checkout', {
       cart: state.cart, clientId: state.posClientId, paymentMethod: state.paymentMethod, cashier: state.userName, depotId: state.currentDepotId,
       advance: state.paymentMethod === 'Crédit' ? (Number(state.posAdvance) || 0) : undefined,
+      pointsRedeemed: loyaltyRedemption(cartTotalOf(state.cart)).points,
     });
     applySaleLocally(data.sale);
-    state.cart = []; state.posClientId = ''; state.posAdvance = '';
+    state.cart = []; state.posClientId = ''; state.posAdvance = ''; state.posPointsRedeemed = '';
     state.lastReceipt = data.sale; state.showReceipt = true; state.receiptView = 'ticket';
     rerender();
   } catch (e) {
@@ -1269,6 +1289,7 @@ async function saveSettings() {
       ncc: state.estNcc, taxRegime: state.estTaxRegime, taxCenter: state.estTaxCenter,
       bankDetails: state.estBankDetails, vatRate: Number(state.estVatRate) || 0,
       lowStockAlertsEnabled: state.estLowStockAlertsEnabled,
+      loyaltyPointValueFcfa: Number(state.estLoyaltyPointValueFcfa) || 0,
     });
     state.estCompanyName = settings.companyName; state.estAddress = settings.address;
     state.estPhone = settings.phone; state.estEmail = settings.email;
@@ -1277,6 +1298,7 @@ async function saveSettings() {
     state.estTaxCenter = settings.taxCenter; state.estBankDetails = settings.bankDetails;
     state.estVatRate = String(settings.vatRate || 0);
     state.estLowStockAlertsEnabled = !!settings.lowStockAlertsEnabled;
+    state.estLoyaltyPointValueFcfa = String(settings.loyaltyPointValueFcfa || 0);
     flashToast('Établissement mis à jour');
     rerender();
   } catch (e) { flashToast(e.message); }
@@ -1762,11 +1784,27 @@ function renderCaisse() {
   }).join('') : `<div class="cart-empty">Le panier est vide.<br/>Cliquez sur un produit pour l'ajouter.</div>`;
 
   const cartCount = state.cart.reduce((a, c) => { const p = state.products.find((pp) => pp.id === c.productId); return a + (p ? c.qty * packagingFor(p, c.unit).multiplier : 0); }, 0);
-  const cartTotal = state.cart.reduce((a, ci) => { const p = state.products.find((pp) => pp.id === ci.productId); return a + (p ? packagingFor(p, ci.unit).price * ci.qty : 0); }, 0);
+  const cartTotal = cartTotalOf(state.cart);
   const clientOptions = state.clients.map((c) => `<option value="${c.id}"${state.posClientId === c.id ? ' selected' : ''}>${esc(c.name)} (${c.points} pts)</option>`).join('');
   const errorHtml = state.scanError
     ? `<div class="pos-error">${esc(state.scanError)}</div>`
     : `<div class="pos-hint">Astuce : un lecteur de code-barres USB fonctionne directement dans ce champ.</div>`;
+
+  // Redeeming points is only offered online — the offline snapshot doesn't
+  // carry the loyalty rate, and reconciling a redemption against a client's
+  // possibly-stale cached points balance during an outage isn't worth the
+  // complexity for what's a narrow edge case (see the server-side
+  // pointsConflict handling in buildSaleFromCart for the one case that IS
+  // handled: a points redemption already recorded offline, at sync time).
+  const posClient = state.posClientId ? state.clients.find((c) => c.id === state.posClientId) : null;
+  const loyaltyRate = Number(state.estLoyaltyPointValueFcfa) || 0;
+  const showLoyaltyRedeem = !!(posClient && loyaltyRate > 0 && posClient.points > 0 && !state.offlineMode);
+  const { points: pointsRedeemedNum, discount: pointsDiscount } = loyaltyRedemption(cartTotal);
+  const loyaltyHtml = showLoyaltyRedeem ? `<div style="display:flex;flex-direction:column;gap:4px">
+    <div style="font-size:11.5px;color:var(--muted)">Points du client : <b>${posClient.points} pts</b> (1 pt = ${fcfa(loyaltyRate)} de réduction)</div>
+    <input id="field-posPointsRedeemed" class="field" type="text" inputmode="numeric" placeholder="Points à utiliser (optionnel)" value="${esc(state.posPointsRedeemed)}" data-bind="posPointsRedeemed" />
+    ${pointsRedeemedNum > 0 ? `<div style="font-size:11.5px;color:var(--green);font-weight:600">Réduction fidélité : -${fcfa(pointsDiscount)}</div>` : ''}
+  </div>` : '';
 
   return `<div class="pos-grid">
     <div class="pos-products-col">
@@ -1789,6 +1827,7 @@ function renderCaisse() {
           <option value=""${state.posClientId === '' ? ' selected' : ''}>Client de passage</option>
           ${clientOptions}
         </select>
+        ${loyaltyHtml}
         <div class="pay-tabs">
           <div class="pay-tab${state.paymentMethod === 'Espèces' ? ' active' : ''}" data-action="setPayCash">Espèces</div>
           <div class="pay-tab${state.paymentMethod === 'Mobile Money' ? ' active' : ''}" data-action="setPayMobile">Mobile Money</div>
@@ -1797,7 +1836,8 @@ function renderCaisse() {
         </div>
         ${state.paymentMethod === 'Crédit' && !state.posClientId ? `<div class="pos-error">Sélectionnez un client pour une vente à crédit.</div>` : ''}
         ${state.paymentMethod === 'Crédit' ? `<input id="field-posAdvance" class="field" type="number" placeholder="Avance versée maintenant (optionnel)" value="${esc(state.posAdvance)}" data-bind="posAdvance" />` : ''}
-        <div class="cart-total-row"><span>Total</span><span class="cart-total-value">${fcfa(cartTotal)}</span></div>
+        ${pointsDiscount > 0 ? `<div class="cart-total-row" style="font-size:12px;color:var(--muted)"><span>Sous-total</span><span>${fcfa(cartTotal)}</span></div>` : ''}
+        <div class="cart-total-row"><span>Total</span><span class="cart-total-value">${fcfa(cartTotal - pointsDiscount)}</span></div>
         <div class="checkout-btn" style="${state.cart.length && !(state.paymentMethod === 'Crédit' && !state.posClientId) ? '' : 'opacity:0.5;cursor:not-allowed'}" data-action="checkout">Encaisser</div>
       </div>
     </div>
@@ -2502,6 +2542,9 @@ function renderEtablissement() {
           <input type="checkbox" data-action="toggleEstLowStockAlertsEnabled"${state.estLowStockAlertsEnabled ? ' checked' : ''} /> Envoyer un SMS/email aux Gérants quand un produit passe sous son seuil minimum
         </label>
         <div class="pos-hint" style="margin:0">Réutilise la configuration Email/SMS ci-dessous — sans elle, l'alerte visuelle dans l'app fonctionne quand même mais rien n'est envoyé.</div>
+        <div class="card-title" style="font-size:12.5px;margin:6px 0 0">Programme de fidélité</div>
+        <input id="field-estLoyaltyPointValueFcfa" class="field-lg" type="number" min="0" step="1" placeholder="Valeur d'un point utilisé (FCFA) — laisser 0 pour désactiver" value="${esc(state.estLoyaltyPointValueFcfa)}" data-bind="estLoyaltyPointValueFcfa" />
+        <div class="pos-hint" style="margin:0">Les clients gagnent automatiquement 1 point par 100 FCFA dépensés. Ce taux fixe combien 1 point vaut en réduction quand un client les utilise à la Caisse.</div>
         <div>
           <div style="font-size:12px;color:var(--muted);margin-bottom:6px">Logo</div>
           ${logoPreview}
@@ -2660,6 +2703,7 @@ function renderTicketHtml(r) {
         ${clientRow}
       </div>
       <div class="receipt-items">${itemsHtml}</div>
+      ${r.pointsDiscount > 0 ? `<div class="receipt-pay"><span>Sous-total</span><span>${fcfa(r.subtotal)}</span></div><div class="receipt-pay"><span>Réduction fidélité (${r.pointsRedeemed} pts)</span><span>-${fcfa(r.pointsDiscount)}</span></div>` : ''}
       <div class="receipt-total"><span>Total</span><span>${fcfa(r.total)}</span></div>
       <div class="receipt-pay"><span>Paiement</span><span>${esc(r.paymentMethod)}</span></div>
       ${r.paymentMethod === 'Crédit' && r.creditPaid > 0 ? `<div class="receipt-pay"><span>Avance versée</span><span>${fcfa(r.creditPaid)}</span></div>` : ''}
@@ -2744,6 +2788,7 @@ function renderInvoiceHtml(r) {
       <tr><td style="font-weight:700">TOTAL TTC</td><td class="right" style="font-weight:700">${fcfa(totalHT + totalVAT)}</td></tr>
       <tr><td>AUTRES TAXES</td><td class="right">${fcfa(0)}</td></tr>
       <tr><td>TIMBRE DE QUITTANCE</td><td class="right">${fcfa(0)}</td></tr>
+      ${r.pointsDiscount > 0 ? `<tr><td>Réduction fidélité (${r.pointsRedeemed} points)</td><td class="right">-${fcfa(r.pointsDiscount)}</td></tr>` : ''}
       <tr><td style="font-weight:700">TOTAL A PAYER</td><td class="right" style="font-weight:700">${fcfa(r.total)}</td></tr>
       ${r.paymentMethod === 'Crédit' && r.creditPaid > 0 ? `<tr><td>Avance versée</td><td class="right">${fcfa(r.creditPaid)}</td></tr>` : ''}
       ${r.paymentMethod === 'Crédit' ? `<tr><td>Solde restant</td><td class="right">${fcfa(r.creditRemaining)}</td></tr>` : ''}
@@ -2820,8 +2865,9 @@ function buildFNETotalsText(r, core) {
     `TOTAL HT : ${fcfa(core.totalHT)}`,
     `TVA (${core.vatRate}%) : ${fcfa(core.totalVAT)}`,
     `TOTAL TTC : ${fcfa(core.totalHT + core.totalVAT)}`,
+    r.pointsDiscount > 0 ? `Réduction fidélité (${r.pointsRedeemed} points) : -${fcfa(r.pointsDiscount)}` : null,
     `TOTAL A PAYER : ${fcfa(r.total)}`,
-  ].join('\n');
+  ].filter((line) => line !== null).join('\n');
 }
 function buildInvoiceText(r) {
   const core = computeInvoiceCore(r);
@@ -3084,7 +3130,7 @@ function onClick(e) {
 // without a redraw — re-rendering on each keystroke would recreate the input
 // element and reset its caret, which breaks typing (especially on
 // type="number" inputs, where the caret position can't be restored at all).
-const LIVE_BINDS = new Set(['posSearch', 'stockSearch']);
+const LIVE_BINDS = new Set(['posSearch', 'stockSearch', 'posPointsRedeemed']);
 function onInput(e) {
   const el = e.target;
   if (!el.dataset || !el.dataset.bind || el.tagName === 'SELECT') return;
@@ -3140,6 +3186,11 @@ function onChange(e) {
     // the newly selected one instead.
     const p = state.products.find((pp) => pp.id === state.editingProductId);
     if (p) state.npStock = stockAt(p, state.npDepotId);
+  } else if (bind === 'posClientId') {
+    // A points count entered for the previous client (or for "Client de
+    // passage", where it isn't even shown) has no meaning for the newly
+    // picked one — different points balance entirely.
+    state.posPointsRedeemed = '';
   } else if (bind === 'rsProductId') {
     // A unit picked for the previous product may not apply to the new one
     // (e.g. it has no carton configured) — reset to avoid a stale mismatch.
